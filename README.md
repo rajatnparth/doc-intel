@@ -22,14 +22,28 @@ through a stream — and untested resilience is decorative.
 
 ---
 
-## Three things you can watch happen
+## Things you can watch happen
 
 ```bash
+python gated_demo.py               # tenant isolation, a live cross-tenant leak, refusal
+python -m app.retrieval.calibrate  # where the refusal threshold comes from
 python hybrid_demo.py              # retrieval failures, with real embeddings
 python -m app.retrieval.ann_bench  # the recall you sell for latency, measured
 python chunk_demo.py               # why chunk size is not a number you pick
 uvicorn app.main:app --reload      # then: curl localhost:8000/health
 ```
+
+**`gated_demo.py`** — two tenants with near-identical contracts. Pre-filtering keeps
+their candidate sets disjoint. Then the villain: `PostFilterRetriever` returns the
+*correct* answer to Acme — and its query-keyed cache is holding four of Contoso's
+chunks, because the cache was populated before the filter ran. The cache developer
+did nothing wrong. **The vulnerability arrived the day post-filtering was chosen.**
+
+**`calibrate.py`** — the module's real artifact, and the one that proved me wrong.
+The textbook says "the answerable and unanswerable distributions overlap, so pick a
+threshold from the tradeoff." Measured: **0 of 20 scores land in the 0.1–0.9 middle**.
+It's bimodal, the tradeoff table is flat, and the threshold is not the interesting knob.
+The actual defect is a false refusal *no threshold can fix* — see below.
 
 **`hybrid_demo.py`** — ask for invoice `INV-2024-0891`. Dense retrieval confidently
 returns `0888`, `0892`, `0893` at ranks 1–3; the right one lands at rank 5.
@@ -70,7 +84,10 @@ app/
   retrieval/
     ann_bench.py     exact vs HNSW vs IVF-Flat vs IVF-PQ, measured
     hybrid.py        BM25 + dense, fused by RRF
-tests/               executable proof of each claim — 27 tests, no network
+    gated.py         pre-filter gates, cross-encoder rerank, the refusal path
+    calibrate.py     where the threshold comes from + why a refusal happened
+    corpus.py        2 tenants, 1 superseded doc — the fixture
+tests/               executable proof of each claim — 36 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -100,6 +117,8 @@ that matter when we add a second provider next quarter?"*
 | `/health` never calls the LLM | Liveness answers "is this process alive?", not "is the world well?" A provider blip shouldn't take your pods out of rotation. |
 | `Usage` is a first-class type | *"What does one request cost you?"* is the follow-up question every time. Streaming sends no usage unless you ask. |
 | `_translate()` in `azure.py` | Where every `openai.*` exception dies. If one reaches a handler, the seam leaked. |
+| **Pre**-filter on `tenant_id`, never post-filter | `tenant_id` is a security boundary, not a relevance signal. Post-filtering returns the right answer *and* leaks — see `gated_demo.py`. A control that depends on the ordering of two function calls is not a control. |
+| A refusal is a return value, not an exception | `Answer(refused=True, score=...)` — the caller can't forget to handle it, and the score is always reported. On a refusal the generator is **never called**: handed confident-looking irrelevant chunks, models answer anyway. |
 
 ---
 
@@ -114,7 +133,36 @@ that matter when we add a second provider next quarter?"*
 | 3.1 | Chunking as information architecture | ✅ |
 | 3.2 | ANN indexes: recall/latency/memory | ✅ |
 | 3.3 | Hybrid search + RRF | ✅ |
-| 3.4 | Metadata gates + the refusal path | ⬜ |
+| 3.4 | Metadata gates + the refusal path | ✅ `gated.py`, `calibrate.py` |
+
+---
+
+## The finding I didn't expect
+
+The refusal gate has a **false refusal that no threshold can fix**, and finding it
+is the most useful thing in this repo.
+
+*"What is the cap on liability?"* is answerable — section 7 covers it. Retrieval
+surfaces the right chunk. The cross-encoder **ranks it #1**. Then scores it
+**0.009**, and the gate refuses.
+
+`ms-marco-MiniLM` was trained on MS MARCO — web search passages. Contract prose
+(*"Neither party's aggregate liability will exceed the fees paid in the twelve
+months preceding the claim"*) is out-of-distribution. So:
+
+> **A cross-encoder's ranking can be trustworthy while its calibration is not.**
+> The refusal gate depends on the calibration, not the ranking — so an
+> out-of-domain reranker breaks refusal *even when retrieval is perfect*.
+
+Lowering the threshold can't help: to admit a 0.009 you must admit everything.
+The fix is a domain-suitable reranker. `calibrate.py` decomposes every false
+refusal into **retrieval failure** vs **calibration failure**, because they have
+completely different fixes and "2 false refusals" tells you neither.
+Current measurement: **0 retrieval failures, 2 calibration failures.**
+
+`test_gated.py::test_reranker_ranks_correctly_but_scores_a_lie` asserts the defect
+on purpose. If a better reranker fixes it, that test fails loudly — which is
+exactly the signal you want.
 
 ---
 
@@ -125,6 +173,9 @@ RAG Agents*. The tests are the interesting part — several exist because a firs
 draft **passed while the code it covered was deleted**, which is the most
 dangerous kind of green. See `test_streaming.py::test_disconnect_cancels_the_upstream_call`
 and `test_hybrid.py::test_rrf_costs_you_the_top_slot_but_keeps_the_answer_in_the_pool`.
+
+Both gates in `gated.py` are sabotage-verified: delete the `tenant_id` check and
+three tests go red; delete the `status == "active"` check and one does.
 
 Azure setup (resource vs deployment, TPM/RPM quota, the admission-time token
 reservation that causes 429s at 40% utilisation): [AZURE_SETUP.md](AZURE_SETUP.md).

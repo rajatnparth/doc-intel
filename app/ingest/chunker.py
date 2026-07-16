@@ -20,12 +20,37 @@ from dataclasses import dataclass, field  # stdlib — @dataclass for Chunk; fie
 from app.ingest.loaders import Section, load_markdown  # local — app/ingest/loaders.py
 
 
+@dataclass(frozen=True)
+class ChunkMeta:
+    """The GATE fields (section 3.4). Not relevance signals — enforcement.
+
+    These are separated from `metadata: dict` deliberately. A dict says "any
+    string key might be here"; this says "every chunk HAS a tenant". You cannot
+    forget to set tenant_id, because the dataclass won't construct without it.
+    Same move as `extract() -> str`: make the unsafe state unrepresentable.
+    """
+
+    tenant_id: str                  # a SECURITY BOUNDARY, not a hint
+    acl: frozenset[str]             # group ids permitted to see this chunk
+    status: str = "active"          # "active" | "superseded" — superseded is NOT retrievable
+
+    def visible_to(self, tenant_id: str, groups: frozenset[str]) -> bool:
+        """The predicate. Kept next to the data it guards, so there is exactly
+        one definition of 'visible' in the codebase."""
+        return (
+            self.tenant_id == tenant_id
+            and self.status == "active"
+            and bool(self.acl & groups)
+        )
+
+
 @dataclass
 class Chunk:
     doc_title: str
     heading: str
     text: str                       # the chunk's own content
     parent_text: str                # the larger block to RETURN on a hit (technique 4)
+    meta: ChunkMeta | None = None   # None only for the pre-3.4 demos
     is_table: bool = False
     chunk_index: int = 0
     metadata: dict = field(default_factory=dict)
@@ -114,9 +139,15 @@ def chunk_document(
     doc_title: str,
     max_chars: int = 700,
     overlap_chars: int = 120,
+    meta: "ChunkMeta | None" = None,
 ) -> list[Chunk]:
     """The real thing. Structure-aware, table-safe, context-enriched,
-    parent-aware. This is what you would defend in the interview."""
+    parent-aware. This is what you would defend in the interview.
+
+    `meta` is stamped onto every chunk this document produces. It's per-DOCUMENT,
+    not per-chunk, because tenancy and permissions are properties of the document
+    you ingested — the chunker has no business deciding them.
+    """
     sections: list[Section] = load_markdown(text, doc_title=doc_title)
     chunks: list[Chunk] = []
 
@@ -134,6 +165,7 @@ def chunk_document(
                         f"Columns and rows follow.\n{table}"
                     ),
                     parent_text=table,
+                    meta=meta,
                     is_table=True,
                     chunk_index=len(chunks),
                     metadata={"kind": "table"},
@@ -157,6 +189,7 @@ def chunk_document(
                     heading=section.heading,
                     text=piece,
                     parent_text=parent,
+                    meta=meta,
                     chunk_index=len(chunks),
                     metadata={"kind": "prose", "section": section.heading},
                 )

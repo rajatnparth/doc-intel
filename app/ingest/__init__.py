@@ -14,9 +14,21 @@ The whole module exists to defend one claim from section 3.1:
 So this is where the care goes.
 """
 
-from app.ingest.chunker import Chunk, chunk_document, naive_chunks  # local — app/ingest/chunker.py
+from app.ingest.chunker import (        # local — app/ingest/chunker.py
+    Chunk,
+    ChunkMeta,
+    chunk_document,
+    naive_chunks,
+)
 from app.ingest.loaders import Section, load_markdown               # local — app/ingest/loaders.py
                                         #   both re-exported so callers write
                                         #   `from app.ingest import chunk_document`
 
-__all__ = ["Chunk", "Section", "chunk_document", "naive_chunks", "load_markdown"]
+__all__ = [
+    "Chunk",
+    "ChunkMeta",
+    "Section",
+    "chunk_document",
+    "naive_chunks",
+    "load_markdown",
+]
