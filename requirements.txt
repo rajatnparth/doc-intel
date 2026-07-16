@@ -1,0 +1,38 @@
+# --- Runtime -----------------------------------------------------------------
+# fastapi        : the web framework. Gives us routing, DI, and Pydantic integration.
+# uvicorn        : the ASGI server that actually runs the event loop.
+#                  [standard] pulls in uvloop + httptools = a faster loop + parser.
+# pydantic       : runtime validation. v2 is a different library from v1 — pin >=2.
+# pydantic-settings : reads config from env vars INTO a Pydantic model (v2 split this out).
+# openai         : the official client. Contains BOTH AzureOpenAI and AsyncAzureOpenAI.
+# httpx          : async HTTP client. The openai lib uses it under the hood; we may too.
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+pydantic-settings>=2.6
+openai>=1.55
+httpx>=0.27
+
+# --- Dev / test --------------------------------------------------------------
+# pytest         : test runner.
+# pytest-asyncio : lets pytest run `async def` tests. Without it they are silently skipped.
+# anyio          : the async abstraction FastAPI/Starlette use. TestClient needs it.
+pytest>=8.3
+pytest-asyncio>=0.24
+anyio>=4.6
+
+# --- Retrieval / ANN (Module 3) ----------------------------------------------
+# numpy     : array math for vectors + exact ground-truth search.
+# hnswlib   : a small, focused HNSW implementation (the efSearch demo).
+# faiss-cpu : Facebook AI Similarity Search — IVF-Flat and IVF-PQ (the memory demo).
+# pypdf     : read PDFs into text for the ingestion loader (3.1).
+# rank-bm25 : the classical lexical scorer — what rescues exact tokens (3.3).
+# fastembed : REAL embeddings (bge-small-en-v1.5) via ONNX. Chosen over
+#             sentence-transformers because it doesn't drag in 427MB of PyTorch.
+#             Downloads ~130MB of model weights on first use.
+numpy>=1.26
+hnswlib>=0.8
+faiss-cpu>=1.8
+pypdf>=4.0
+rank-bm25>=0.2.2
+fastembed>=0.4
