@@ -14,12 +14,13 @@ they are the spec.
 from typing import AsyncIterator        # stdlib — stream_chat's return type
 
 from openai import (                     # 3rd-party: openai — the official SDK. Note every
-                                        #   name here is an EXCEPTION type except the client,
+                                        #   name here is an EXCEPTION type except the clients,
                                         #   because _translate() maps them onto our own taxonomy.
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
     AsyncAzureOpenAI,      # ← Async. Not AzureOpenAI. Section 1.1, the whole point.
+    AzureOpenAI,           # ← sync, for AzureEmbeddingClient only — see its docstring
     BadRequestError,
     RateLimitError,
 )
@@ -36,6 +37,38 @@ from app.llm.base import (               # local — app/llm/base.py: OUR error 
     TokenChunk,
     Usage,
 )
+
+
+def _translate(exc: Exception) -> Exception:
+    """Normalise provider exceptions into our taxonomy.
+
+    This function IS the seam. Every `openai.*` exception dies here — from the
+    chat client and the embedding client alike. If an `openai.RateLimitError`
+    ever reaches a route handler, swapping to Bedrock next quarter becomes a
+    refactor instead of a config change.
+    """
+    if isinstance(exc, RateLimitError):
+        retry_after = None
+        if exc.response is not None:
+            raw = exc.response.headers.get("retry-after")
+            # Azure knows when capacity frees up. Our backoff formula guesses.
+            retry_after = float(raw) if raw else None
+        return RateLimited(str(exc), retry_after=retry_after)
+
+    if isinstance(exc, BadRequestError):
+        # Azure signals the content filter via a 400 with a specific code.
+        body = getattr(exc, "body", None) or {}
+        if isinstance(body, dict) and body.get("code") == "content_filter":
+            return ContentFiltered(str(exc))
+        return BadRequest(str(exc))
+
+    if isinstance(exc, (APITimeoutError, APIConnectionError)):
+        return ProviderUnavailable(str(exc))
+
+    if isinstance(exc, APIStatusError) and exc.status_code >= 500:
+        return ProviderUnavailable(str(exc))
+
+    return exc
 
 
 class AzureLLMClient:
@@ -69,37 +102,6 @@ class AzureLLMClient:
         #
         # TODO(1.4): circuit breaker. After N consecutive failures, stop calling
         #   for a window. Stops one degraded region eating the whole thread budget.
-
-    # -------------------------------------------------------------------------
-    def _translate(self, exc: Exception) -> Exception:
-        """Normalise provider exceptions into our taxonomy.
-
-        This method IS the seam. Every `openai.*` exception dies here. If an
-        `openai.RateLimitError` ever reaches a route handler, swapping to Bedrock
-        next quarter becomes a refactor instead of a config change.
-        """
-        if isinstance(exc, RateLimitError):
-            retry_after = None
-            if exc.response is not None:
-                raw = exc.response.headers.get("retry-after")
-                # Azure knows when capacity frees up. Our backoff formula guesses.
-                retry_after = float(raw) if raw else None
-            return RateLimited(str(exc), retry_after=retry_after)
-
-        if isinstance(exc, BadRequestError):
-            # Azure signals the content filter via a 400 with a specific code.
-            body = getattr(exc, "body", None) or {}
-            if isinstance(body, dict) and body.get("code") == "content_filter":
-                return ContentFiltered(str(exc))
-            return BadRequest(str(exc))
-
-        if isinstance(exc, (APITimeoutError, APIConnectionError)):
-            return ProviderUnavailable(str(exc))
-
-        if isinstance(exc, APIStatusError) and exc.status_code >= 500:
-            return ProviderUnavailable(str(exc))
-
-        return exc
 
     # -------------------------------------------------------------------------
     async def stream_chat(
@@ -148,7 +150,7 @@ class AzureLLMClient:
                     yield TokenChunk(text=delta.content)
 
         except Exception as exc:  # noqa: BLE001 — deliberate: translate, then re-raise
-            raise self._translate(exc) from exc
+            raise _translate(exc) from exc
 
     # -------------------------------------------------------------------------
     async def extract(self, text: str, schema: dict, *, max_tokens: int = 512) -> str:
@@ -175,7 +177,7 @@ class AzureLLMClient:
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            raise self._translate(exc) from exc
+            raise _translate(exc) from exc
 
         # Return the RAW STRING. Not a dict. Not a parsed model.
         #
@@ -195,3 +197,42 @@ class AzureLLMClient:
 # (Section 1.2: static checking protects you from yourself; Pydantic protects
 # you from the world. This is a "from yourself" problem.)
 _CONFORMS_TO: type = LLMClient  # noqa: F401 — imported for the type-check contract
+
+
+class AzureEmbeddingClient:
+    """Azure OpenAI embeddings behind the EmbeddingClient protocol.
+
+    Note the SYNC AzureOpenAI client, in a file whose whole opening argument
+    was "async, not sync". Not a contradiction — a scope statement: every
+    embed() call site today is index CONSTRUCTION, batch work off the request
+    path, and the protocol is sync for the same reason (base.py). Forcing the
+    async client here would push asyncio.run() into every retriever
+    constructor, which is the worse lie. When retrieval joins a route in
+    module 4, this follows stream_chat into async.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._client = AzureOpenAI(
+            azure_endpoint=settings.azure_openai_endpoint,
+            api_key=settings.azure_openai_api_key,
+            api_version=settings.azure_openai_api_version,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=0,  # same rule as chat: we own retry policy
+        )
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        try:
+            resp = self._client.embeddings.create(
+                # The deployment NAME, not the model name — same trap as chat.
+                model=self._settings.azure_openai_embedding_deployment,
+                input=texts,
+            )
+        except Exception as exc:  # noqa: BLE001 — deliberate: translate, then re-raise
+            raise _translate(exc) from exc
+
+        # The API contract orders results by `index`, not necessarily by
+        # position in the response array. Sorting costs nothing and removes
+        # an assumption; a misordered embedding matrix fails SILENTLY — every
+        # search returns plausible wrong neighbours.
+        return [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]

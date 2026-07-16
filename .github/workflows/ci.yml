@@ -1,0 +1,38 @@
+# The badge on the README is only worth what this file actually runs:
+# the full suite, stub provider, no secrets available to leak.
+#
+# The retrieval tests use REAL local models (~210MB: bge-small embedder +
+# ms-marco cross-encoder). fastembed downloads them to the OS temp dir by
+# default, which actions/cache can't usefully persist — so we pin the cache
+# path and cache it keyed on the model names (see app/llm/local.py).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FASTEMBED_CACHE_PATH: /home/runner/.cache/fastembed
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache retrieval models (embedder + cross-encoder)
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: fastembed-bge-small-en-v1.5-msmarco-minilm-l6-v2
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the suite
+        run: pytest -q

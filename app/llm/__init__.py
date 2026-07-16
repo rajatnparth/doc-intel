@@ -12,9 +12,23 @@ RELATIONSHIP, not of the endpoint. Smear them across route handlers and the
 seam disappears.
 """
 
-from app.llm.base import LLMClient, LLMError, TokenChunk, Usage  # local — app/llm/base.py
+from app.llm.base import (               # local — app/llm/base.py
                                         #   re-exported here so callers can write
                                         #   `from app.llm import LLMClient` instead of
                                         #   reaching into the base submodule
+    EmbeddingClient,
+    LLMClient,
+    LLMError,
+    RerankClient,
+    TokenChunk,
+    Usage,
+)
 
-__all__ = ["LLMClient", "LLMError", "TokenChunk", "Usage"]
+__all__ = [
+    "EmbeddingClient",
+    "LLMClient",
+    "LLMError",
+    "RerankClient",
+    "TokenChunk",
+    "Usage",
+]

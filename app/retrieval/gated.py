@@ -18,9 +18,12 @@ from __future__ import annotations      # stdlib (special) — lazy annotations;
 
 import math                             # stdlib — sigmoid, to turn logits into 0..1
 from dataclasses import dataclass       # stdlib — Principal / Answer result types
-from functools import lru_cache         # stdlib — load the cross-encoder once
+from functools import lru_cache         # stdlib — the per-principal view cache
 
+from app.config import get_settings     # local — app/config.py (the default reranker's config)
 from app.ingest import Chunk            # local — app/ingest/chunker.py
+from app.llm.base import RerankClient   # local — app/llm/base.py (the seam)
+from app.llm.factory import build_reranker  # local — app/llm/factory.py
 from app.retrieval.hybrid import Hit, HybridRetriever  # local — app/retrieval/hybrid.py
 
 
@@ -116,26 +119,21 @@ class PostFilterRetriever:
 # =============================================================================
 # The refusal path
 # =============================================================================
-@lru_cache(maxsize=1)
-def _cross_encoder():
-    """ms-marco-MiniLM-L-6-v2 — a real cross-encoder, 80MB, ONNX, CPU.
-
-    Bi-encoder (retrieval) embeds query and doc separately, in advance, and
-    compares two frozen points. This reads the PAIR jointly, attending across
-    both — too slow for a corpus, right for the top ~50.
-    """
-    from fastembed.rerank.cross_encoder import TextCrossEncoder  # 3rd-party: fastembed
-                                        #   lazy: only needed when you rerank
-
-    return TextCrossEncoder("Xenova/ms-marco-MiniLM-L-6-v2")
-
-
 def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
-def rerank(query: str, chunks: list[Chunk]) -> list[tuple[Chunk, float]]:
+def rerank(
+    query: str,
+    chunks: list[Chunk],
+    *,
+    reranker: RerankClient | None = None,
+) -> list[tuple[Chunk, float]]:
     """Score (query, chunk) pairs jointly. Returns 0..1, best first.
+
+    The cross-encoder arrives through the seam (RerankClient — by default
+    ms-marco-MiniLM via app/llm/local.py) and hands back RAW scores. Everything
+    after that line is OUR problem, and deliberately so:
 
     ⚠️ THE DETAIL EVERY TUTORIAL SKIPS: ms-marco cross-encoders emit LOGITS, not
     probabilities. Measured on our corpus: +5.60 for a matching pair, -11.33 for
@@ -146,7 +144,8 @@ def rerank(query: str, chunks: list[Chunk]) -> list[tuple[Chunk, float]]:
     choice, not a calibration: sigmoid is monotonic, so it changes no ranking and
     creates no information. You still have to MEASURE where to cut (calibrate.py).
     """
-    raw = [float(s) for s in _cross_encoder().rerank(query, [c.text_to_embed for c in chunks])]
+    reranker = reranker or build_reranker(get_settings())
+    raw = reranker.rerank(query, [c.text_to_embed for c in chunks])
     scored = [(c, _sigmoid(r)) for c, r in zip(chunks, raw)]
     return sorted(scored, key=lambda t: -t[1])
 

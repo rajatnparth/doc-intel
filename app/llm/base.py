@@ -167,3 +167,44 @@ class LLMClient(Protocol):
     async def aclose(self) -> None:
         """Release connections. Called from the app's lifespan shutdown."""
         ...
+
+
+# =============================================================================
+# The retrieval models cross the SAME seam
+#
+# Embedding and reranking are model-provider calls, exactly like chat. The
+# first draft of hybrid.py imported fastembed directly — it compiled, it ran,
+# and it quietly re-created the problem this package exists to prevent:
+# "swap providers" had become a refactor again, just for a different model.
+# tests/test_seam.py now fails the build on that mistake.
+#
+# Both protocols are synchronous, and that is a decision, not an oversight:
+# every call site today is index CONSTRUCTION — batch work off the request
+# path. When retrieval joins a route (module 4), these grow async twins the
+# way stream_chat is async. The seam is the constant; the calling convention
+# follows the call site.
+# =============================================================================
+@runtime_checkable
+class EmbeddingClient(Protocol):
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """One vector per input text, in input order.
+
+        Plain lists of floats, not numpy arrays: the seam speaks in types any
+        provider can produce. float32, L2-normalising, and "cosine == dot" are
+        RETRIEVAL decisions, so they live in app/retrieval — not here.
+        """
+        ...
+
+
+@runtime_checkable
+class RerankClient(Protocol):
+    def rerank(self, query: str, texts: list[str]) -> list[float]:
+        """Score (query, text) pairs jointly. RAW scores, in input order.
+
+        Raw means provider-scale: ms-marco emits logits (+5.6 for a match,
+        -11.3 for junk), a hosted reranker may emit 0..1. Same principle as
+        extract() returning a raw str — the client reports what the model
+        said; interpreting the scale (sigmoid, thresholds, refusal) is a
+        calibration decision the caller owns. See app/retrieval/calibrate.py.
+        """
+        ...

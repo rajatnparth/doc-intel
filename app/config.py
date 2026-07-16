@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # A typo in .env ("stubb") is now a startup crash, not a runtime mystery.
     llm_provider: Literal["stub", "azure"] = "stub"
 
+    # Embeddings cross the same seam as chat (app/llm/base.py) but get their
+    # OWN knob: "local + azure-chat" is a legitimate production mix (local
+    # embeddings are free and private; chat quality you pay for). "local" is
+    # bge-small-en-v1.5 on CPU — no key, no account. Flipping this word is the
+    # entire provider swap; if it takes more than that, see factory.py.
+    embedding_provider: Literal["local", "azure"] = "local"
+
     # ---- Azure ---------------------------------------------------------------
     # These are Optional-ish (empty string default) because they're only needed
     # when llm_provider == "azure". We enforce that in `validate_for_provider()`
@@ -69,6 +76,22 @@ class Settings(BaseSettings):
             if missing:
                 raise RuntimeError(
                     f"LLM_PROVIDER=azure but these are unset: {', '.join(missing)}. "
+                    f"See AZURE_SETUP.md."
+                )
+
+        if self.embedding_provider == "azure":
+            missing = [
+                name
+                for name in (
+                    "azure_openai_endpoint",
+                    "azure_openai_api_key",
+                    "azure_openai_embedding_deployment",
+                )
+                if not getattr(self, name)
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"EMBEDDING_PROVIDER=azure but these are unset: {', '.join(missing)}. "
                     f"See AZURE_SETUP.md."
                 )
 

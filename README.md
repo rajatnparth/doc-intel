@@ -1,5 +1,7 @@
 # doc-intel
 
+[![CI](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml/badge.svg)](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml)
+
 **A multi-tenant document intelligence API** — upload contracts and invoices, ask
 questions, get cited answers. Built to be *defended*, not demoed: every design
 decision here has a failure mode attached, and most of them have a test that
@@ -12,7 +14,9 @@ git clone https://github.com/rajatnparth/doc-intel && cd doc-intel
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # defaults to a stub provider — no Azure key needed
-pytest -q                       # 27 tests, no network
+pytest -q                       # 39 tests. First run downloads ~210MB of local
+                                # models (embedder + cross-encoder); after that,
+                                # no network.
 ```
 
 **No API key required to run any of it.** `LLM_PROVIDER=stub` swaps in a fake
@@ -74,10 +78,11 @@ app/
   sse.py             The streaming protocol: discriminated frames + [DONE]
   main.py            FastAPI app, DI, error envelope, routes
   llm/
-    base.py          LLMClient Protocol + the error taxonomy. The seam.
+    base.py          LLMClient + EmbeddingClient + RerankClient Protocols. The seam.
     stub.py          Fault-injecting fake provider (429, mid-stream death, hang)
-    azure.py         Real AsyncAzureOpenAI client
-    factory.py       One `if`. The entire provider swap.
+    azure.py         Real Azure OpenAI clients (chat + embeddings)
+    local.py         bge-small embedder + ms-marco reranker — the ONLY fastembed import
+    factory.py       Three functions, one `if` each. The entire provider swap.
   ingest/
     loaders.py       bytes -> Sections (structure kept, page furniture stripped)
     chunker.py       Sections -> Chunks (tables atomic, context prepended, parents)
@@ -87,16 +92,22 @@ app/
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 tenants, 1 superseded doc — the fixture
-tests/               executable proof of each claim — 36 tests
+tests/               executable proof of each claim — 39 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
-imports `openai`. Retry, timeout, semaphore and circuit breaker are properties of
-the *provider relationship*, not of an endpoint — so they live in the client
-wrapper, and a route handler reads like a paragraph of business logic.
+imports `openai` — or `fastembed`, because embeddings and reranking are provider
+calls too. The first draft got this wrong: chat crossed the seam while `hybrid.py`
+imported its embedder directly, which quietly made "swap providers by config" a
+false claim. `tests/test_seam.py` now walks the AST of every module (lazy imports
+included) and fails the build on a violation. Retry, timeout, semaphore and
+circuit breaker are properties of the *provider relationship*, not of an endpoint
+— so they live in the client wrapper, and a route handler reads like a paragraph
+of business logic.
 
 That's not aesthetics. It's the answer to *"where does this live, and why does
-that matter when we add a second provider next quarter?"*
+that matter when we add a second provider next quarter?"* For embeddings, that
+quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 
 **Every import is tagged with its origin** (`# stdlib`, `# 3rd-party: <pkg>`,
 `# local — <path>`). See [CONVENTIONS.md](CONVENTIONS.md).
@@ -119,6 +130,7 @@ that matter when we add a second provider next quarter?"*
 | `_translate()` in `azure.py` | Where every `openai.*` exception dies. If one reaches a handler, the seam leaked. |
 | **Pre**-filter on `tenant_id`, never post-filter | `tenant_id` is a security boundary, not a relevance signal. Post-filtering returns the right answer *and* leaks — see `gated_demo.py`. A control that depends on the ordering of two function calls is not a control. |
 | A refusal is a return value, not an exception | `Answer(refused=True, score=...)` — the caller can't forget to handle it, and the score is always reported. On a refusal the generator is **never called**: handed confident-looking irrelevant chunks, models answer anyway. |
+| The seam is a **test**, not a convention | A rule that lives in a README gets violated by the author within the month — measured: it did. `test_seam.py` parses every module's AST, so a lazy `import fastembed` inside a helper function fails CI the same as a top-level one. |
 
 ---
 
