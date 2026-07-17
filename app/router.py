@@ -1,34 +1,58 @@
-"""Phase 4 — the numbers-vs-wording router.
+"""Phase 4 (+ the tier-2 upgrade) — the numbers-vs-wording router.
 
-A router is a CLASSIFIER, and this is the cheapest classifier that meets the
-bar: keyword + question-shape matching. Deterministic, zero-token, and — the
-property that matters in a regulated domain — EXPLAINABLE: "why did the bot
-answer this from the record?" has a greppable answer, not a model's mood.
+A router is a CLASSIFIER, and this module now holds two of them, TIERED:
 
-The production upgrade is LLM function-calling (the router IS tool selection —
-this module is the agents lesson with the model removed). When that upgrade
-comes, only the classifier body changes: `classify(question) -> FactField |
-None` is the interface both versions satisfy, exactly like swapping the stub
-LLM for Azure behind LLMClient.
+  tier 1  deterministic keyword + question-shape match. Free, instant, and —
+          the property that matters in a regulated domain — EXPLAINABLE:
+          "why did the bot answer this from the record?" has a greppable
+          answer, not a model's mood.
+  tier 2  LLM intent classification, for the phrasings tier 1 cannot see:
+          "how much do I pay from my own pocket when I claim?" names no fact
+          noun, but it IS an excess question — and letting it fall to RAG
+          means the model quotes the excess FROM PROSE, which is right today
+          and stale the day an endorsement changes the record mid-term. The
+          paraphrase gap is a hole in numbers-never-from-RAG itself, not a
+          UX nit. (This corrected the phase-4 claim that fall-through always
+          fails safe: refusal is safe; prose numbers are not.)
+
+TIER 2 IS GATE 2 ALL OVER AGAIN
+-------------------------------
+The model's routing verdict is UNTRUSTED INPUT: it arrives through the same
+extract() seam as invoice JSON and is validated by the same discipline —
+strict Pydantic against a CLOSED decision space. That closure is also the
+injection containment: a hostile question can at worst flip which subsystem
+answers; it cannot name a tenant, widen an ACL, or invent a fact field.
+Every failure (LLMError, junk JSON, "wording") falls to RAG, where the
+refusal gate stands — the router may ADD confidence, never remove a layer.
+
+Costs, stated: tier 2 spends one small LLM call on tier-1 misses (production
+points it at a cheap model — a router does not need the flagship). Tier-1
+false positives are NOT rescued by tier 2, because tier 1 short-circuits —
+that is the price of cost-ordering, and the known wart stays documented in
+the tests. And the fakes in test_router.py pin OUR WIRING, not the model's
+judgment: router QUALITY needs a labelled eval set (phase 7).
 
 THE HARD CASE, WHICH IS THE DESIGN
 ----------------------------------
     "what is my excess?"                        -> FACTS   (a value question)
     "does the excess apply to windscreen claims?" -> WORDING (a terms question)
 
-Same noun, different question. A noun match alone would route the second one
-to the record and answer a question nobody asked. So an intent requires BOTH:
-a fact noun AND a value-asking shape ("what is", "how much", "when is"...).
-False negatives fall through to RAG, which refuses when it should — the safe
-direction. False positives would put the WRONG SUBSYSTEM's authority behind
-an answer, so the patterns stay tight on purpose.
+Same noun, different question. Tier-1 intent requires BOTH a fact noun AND a
+value-asking shape; tier 2 is told the same rule in its instruction.
 
-Nothing here imports FastAPI, openai, or retrieval. Pure text in, enum out.
+Nothing here imports FastAPI or openai — tier 2 speaks through LLMClient,
+the same seam everything else uses. Text in, enum out.
 """
 
 from __future__ import annotations      # stdlib (special) — lazy annotations; first line
 
 from enum import Enum                   # stdlib — the closed set of routable facts
+from typing import Literal              # stdlib — RouteDecision's closed value spaces
+
+from pydantic import BaseModel, ConfigDict, ValidationError  # 3rd-party: pydantic —
+                                        #   Gate-2 validation of the model's verdict
+
+from app.llm.base import LLMClient, LLMError  # local — app/llm/base.py (the seam)
 
 
 class FactField(str, Enum):
@@ -96,3 +120,79 @@ def classify(question: str) -> FactField | None:
         if noun in q:
             return field
     return None
+
+
+# =============================================================================
+# Tier 2 — the LLM classifier, behind Gate-2 discipline.
+# =============================================================================
+class RouteDecision(BaseModel):
+    """The model's verdict, as a CLOSED contract.
+
+    strict + extra="forbid" + Literal everywhere: the decision space is an
+    enum, not a text field. This is what bounds both hallucination and
+    injection — there is no string the model can emit that widens what the
+    facts path can do."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    route: Literal["facts", "wording"]
+    field: (
+        Literal[
+            "own_damage_excess",
+            "annual_premium",
+            "idv",
+            "ncb_percent",
+            "policy_number",
+            "renewal_date",
+        ]
+        | None
+    ) = None
+
+
+_ROUTER_INSTRUCTION = """Classify one customer question for a motor insurance assistant.
+
+Decide between:
+  "facts"   — the question asks for the CURRENT VALUE of one account field:
+              own_damage_excess, annual_premium, idv, ncb_percent,
+              policy_number, renewal_date.
+  "wording" — anything else: cover terms, processes, conditions, claims —
+              including questions that merely MENTION a fact field
+              ("does the excess apply to windscreen claims?" is wording).
+
+Return JSON only: {"route": "facts", "field": "<field>"} or {"route": "wording", "field": null}.
+
+Question: """
+
+
+def _parse_decision(raw: str) -> FactField | None:
+    """Gate 2 for the router. Anything that is not a clean, complete 'facts'
+    verdict routes to wording — the direction with a refusal gate behind it."""
+    try:
+        decision = RouteDecision.model_validate_json(raw)
+    except ValidationError:
+        return None
+    if decision.route != "facts" or decision.field is None:
+        return None
+    return FactField(decision.field)
+
+
+async def route(question: str, llm: LLMClient) -> FactField | None:
+    """Tier 1, then tier 2, then RAG. The tiers may only ADD a facts route.
+
+    With the stub provider, tier 2 is INERT by construction: the stub's canned
+    extract() output fails RouteDecision validation and falls to wording — the
+    keyless quickstart behaves exactly like tier-1-only, and a real provider
+    lights tier 2 up without a code change."""
+    field = classify(question)
+    if field is not None:
+        return field                     # free, explainable, short-circuits
+
+    try:
+        raw = await llm.extract(
+            _ROUTER_INSTRUCTION + question,
+            RouteDecision.model_json_schema(),
+            max_tokens=60,               # a verdict, not an essay — quota honesty
+        )
+    except LLMError:
+        return None                     # the router never breaks the ask; RAG absorbs
+    return _parse_decision(raw)

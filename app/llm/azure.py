@@ -195,7 +195,14 @@ class AzureLLMClient:
                 return await self._client.chat.completions.create(
                     model=self._settings.azure_openai_chat_deployment,
                     messages=[
-                        {"role": "system", "content": "Extract invoice fields. Cite the page."},
+                        # Neutral on purpose. The first draft said "Extract
+                        # invoice fields. Cite the page." — domain knowledge
+                        # INSIDE the provider layer, a seam violation in spirit
+                        # that only surfaced when the router became extract()'s
+                        # second caller. The task instruction travels in `text`,
+                        # owned by the caller; the provider knows only "follow
+                        # the schema".
+                        {"role": "system", "content": "Follow the instruction in the user message. Return only JSON conforming to the provided schema."},
                         {"role": "user", "content": text},
                     ],
                     temperature=0.0,

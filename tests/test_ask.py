@@ -54,6 +54,7 @@ class CountingLLM:
 
     def __init__(self) -> None:
         self.stream_chat_calls = 0
+        self.extract_calls = 0
         self.prompts: list[str] = []
 
     async def stream_chat(self, prompt, *, temperature=0.0, max_tokens=512):
@@ -64,7 +65,13 @@ class CountingLLM:
         yield TokenChunk(text="", usage=Usage(prompt_tokens=200, completion_tokens=8))
 
     async def extract(self, text, schema, *, max_tokens=512):
-        raise AssertionError("extract must not be called by /v1/ask")
+        # The tier-2 router calls extract() on tier-1 misses — that is
+        # legitimate. Behave like the stub: canned output that fails
+        # RouteDecision validation, so the question flows to RAG. The
+        # "never called" claims in this file are about the GENERATOR
+        # (stream_chat), which is the call that can fabricate an answer.
+        self.extract_calls += 1
+        return '{"invoice_total": 1240.5}'
 
     async def aclose(self) -> None:
         return None

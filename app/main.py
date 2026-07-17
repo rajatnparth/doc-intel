@@ -27,8 +27,9 @@ from app.llm.factory import build_llm_client            # local — app/llm/fact
 from app.policy_admin import PolicyAdmin, StubPolicyAdmin  # local — app/policy_admin.py
                                         #   (the system of record — numbers live here)
 from app.rag import build_prompt, select_sources        # local — app/rag.py (the context budget)
-from app.router import FIELD_LABELS, FactField, classify  # local — app/router.py
-                                        #   (numbers-vs-wording, deterministically)
+from app.router import FIELD_LABELS, FactField, route   # local — app/router.py
+                                        #   (numbers-vs-wording: tier 1 deterministic,
+                                        #   tier 2 LLM-classified, both behind Gate 2)
 from app.retrieval.corpus import load_corpus            # local — app/retrieval/corpus.py (fixture)
 from app.retrieval.gated import Principal, PreFilterRetriever, answer  # local —
                                         #   app/retrieval/gated.py (gates + refusal)
@@ -335,10 +336,12 @@ async def _ask_events(
     # …and only for PRESENT-TENSE questions. The stub record holds the CURRENT
     # term; a question anchored to a past date (as_of) needs the record as of
     # that date, which this connector cannot serve — but the effective-dated
-    # wording archive can. A real core system supports as-of queries; when the
-    # connector grows that, this condition is where the routing widens.
-    field = classify(req.question)
-    if field is not None and req.as_of is None:
+    # wording archive can. Dated questions skip the router entirely: no point
+    # spending a tier-2 LLM call deciding a route that is already decided.
+    field = None
+    if req.as_of is None:
+        field = await route(req.question, llm)
+    if field is not None:
         record = policy_admin.get_record(principal.tenant_id)
         if record is None:
             # No record, and falling through to RAG would answer a numbers

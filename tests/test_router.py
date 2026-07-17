@@ -14,9 +14,10 @@ from fastapi.testclient import TestClient  # 3rd-party: fastapi (submodule) — 
 
 from app.auth import mint               # local — app/auth.py
 from app.config import get_settings     # local — app/config.py
+from app.llm.stub import StubLLMClient  # local — app/llm/stub.py (tier-2 inertness proof)
 from app.main import app, get_llm       # local — app/main.py
 from app.policy_admin import StubPolicyAdmin  # local — app/policy_admin.py
-from app.router import FactField, classify  # local — app/router.py
+from app.router import FactField, _parse_decision, classify, route  # local — app/router.py
 
 DOCS = Path(__file__).parent.parent / "sample_docs"
 
@@ -37,7 +38,9 @@ def events_of(body: str) -> list:
 
 
 class ExplodingLLM:
-    """Any call is a test failure. The facts path must never generate."""
+    """Any call is a test failure. Used where NEITHER tier-2 routing nor
+    generation may happen: tier-1 hits (short-circuit) and dated questions
+    (router skipped)."""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -48,7 +51,27 @@ class ExplodingLLM:
         yield  # pragma: no cover — makes this an async generator
 
     async def extract(self, text, schema, *, max_tokens=512):
-        raise AssertionError("extract must not be called")
+        raise AssertionError("tier 2 ran where tier 1 or the as_of guard should have decided")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class RoutingLLM:
+    """Tier 2 with a scripted verdict. Pins OUR wiring — validation, fallback,
+    the facts handoff — not the model's judgment (that needs an eval set)."""
+
+    def __init__(self, verdict: str) -> None:
+        self.verdict = verdict
+        self.extract_calls = 0
+
+    async def stream_chat(self, prompt, *, temperature=0.0, max_tokens=512):
+        raise AssertionError("a routed facts question must never generate")
+        yield  # pragma: no cover
+
+    async def extract(self, text, schema, *, max_tokens=512):
+        self.extract_calls += 1
+        return self.verdict
 
     async def aclose(self) -> None:
         return None
@@ -91,6 +114,51 @@ def test_wording_questions_fall_through_to_rag() -> None:
     assert classify("what is my renewal process?") is FactField.RENEWAL_DATE  # the documented wart
     assert classify("what is the status of claim CLM-2026-0891?") is None
     assert classify("what is the limit of liability?") is None
+
+
+# =============================================================================
+# Tier 2 — Gate-2 discipline on the model's verdict.
+# =============================================================================
+def test_parse_decision_is_a_closed_gate() -> None:
+    """Everything that is not a clean, complete facts verdict routes to
+    wording — including a syntactically perfect verdict naming a field that
+    does not exist. The decision space is an enum, not a text field."""
+    assert _parse_decision('{"route": "facts", "field": "own_damage_excess"}') is FactField.OWN_DAMAGE_EXCESS
+    assert _parse_decision('{"route": "wording", "field": null}') is None
+    assert _parse_decision('{"route": "facts", "field": null}') is None, "facts without a field is not actionable"
+    assert _parse_decision('{"route": "facts", "field": "bank_balance"}') is None, "unknown field: closed set"
+    assert _parse_decision('{"invoice_total": 1240.5}') is None, "the stub's canned output falls through"
+    assert _parse_decision("not json at all") is None
+
+
+@pytest.mark.asyncio
+async def test_tier1_hit_never_spends_a_tier2_call() -> None:
+    """The short-circuit is the cost model: explicit phrasing must be free."""
+    llm = RoutingLLM('{"route": "wording", "field": null}')
+    assert await route("what is my excess?", llm) is FactField.OWN_DAMAGE_EXCESS
+    assert llm.extract_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tier2_routes_the_paraphrase_tier1_cannot_see() -> None:
+    """No fact noun anywhere — this is the question that used to leak to RAG
+    and get its number FROM PROSE. The scripted verdict stands in for the
+    model; what this pins is that a valid verdict actually routes."""
+    q = "how much do I pay from my own pocket when I claim?"
+    assert classify(q) is None, "tier 1 must genuinely miss, or this test tests nothing"
+
+    llm = RoutingLLM('{"route": "facts", "field": "own_damage_excess"}')
+    assert await route(q, llm) is FactField.OWN_DAMAGE_EXCESS
+    assert llm.extract_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_tier2_is_inert_with_the_stub_provider() -> None:
+    """The keyless quickstart behaves tier-1-only WITHOUT special-casing: the
+    stub's canned extract() output fails RouteDecision validation and falls to
+    wording. A real provider lights tier 2 up with zero code change."""
+    stub = StubLLMClient(token_delay=0.0)
+    assert await route("how much do I pay from my own pocket when I claim?", stub) is None
 
 
 # =============================================================================
@@ -166,6 +234,29 @@ def test_dated_value_questions_bypass_the_facts_path(exploding_llm) -> None:
 
     kinds = [e["type"] if isinstance(e, dict) else e for e in events_of(r.text)]
     assert "facts" not in kinds, "a dated question must not be served the current record"
+
+
+def test_tier2_verdict_reaches_the_record_end_to_end() -> None:
+    """HTTP-level: a paraphrased excess question + a scripted facts verdict →
+    the facts frame, the record's number, and the generator never runs (the
+    RoutingLLM's stream_chat explodes on contact)."""
+    fake = RoutingLLM('{"route": "facts", "field": "own_damage_excess"}')
+    app.dependency_overrides[get_llm] = lambda: fake
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/v1/ask",
+                json={"question": "how much do I pay from my own pocket when I claim?"},
+                headers=auth(),
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    ev = events_of(r.text)
+    kinds = [e["type"] if isinstance(e, dict) else e for e in ev]
+    assert kinds == ["facts", "done", "[DONE]"]
+    assert ev[0]["facts"] == [{"name": "Own damage excess", "value": "₹2,000"}]
+    assert fake.extract_calls == 1
 
 
 # =============================================================================
