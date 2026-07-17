@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     llm_max_concurrency: int = Field(8, ge=1)
     llm_max_retries: int = Field(2, ge=0)
 
+    # How long a request will queue for a semaphore slot before we SHED it with
+    # our own 429. Rejecting in 5ms is kinder than timing out in 60s: the client
+    # can back off sensibly, and the slot goes to someone we can actually serve.
+    llm_acquire_timeout_seconds: float = Field(0.5, gt=0)
+
+    # Circuit breaker. Consecutive failures before we stop calling entirely, and
+    # how long we stay open before allowing ONE probe through.
+    llm_breaker_threshold: int = Field(5, ge=1)
+    llm_breaker_cooldown_seconds: float = Field(30.0, gt=0)
+
     def validate_for_provider(self) -> None:
         """Fail fast if we're told to use Azure but weren't given credentials.
 

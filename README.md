@@ -14,7 +14,7 @@ git clone https://github.com/rajatnparth/doc-intel && cd doc-intel
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # defaults to a stub provider — no Azure key needed
-pytest -q                       # 39 tests. First run downloads ~210MB of local
+pytest -q                       # 63 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network.
 ```
@@ -29,6 +29,7 @@ through a stream — and untested resilience is decorative.
 ## Things you can watch happen
 
 ```bash
+python loadtest.py                 # 30 concurrent + 429s: what the boundary buys, measured
 python gated_demo.py               # tenant isolation, a live cross-tenant leak, refusal
 python -m app.retrieval.calibrate  # where the refusal threshold comes from
 python hybrid_demo.py              # retrieval failures, with real embeddings
@@ -82,6 +83,7 @@ app/
     stub.py          Fault-injecting fake provider (429, mid-stream death, hang)
     azure.py         Real Azure OpenAI clients (chat + embeddings)
     local.py         bge-small embedder + ms-marco reranker — the ONLY fastembed import
+    resilience.py    breaker -> semaphore -> retry+jitter. Provider-agnostic.
     factory.py       Three functions, one `if` each. The entire provider swap.
   ingest/
     loaders.py       bytes -> Sections (structure kept, page furniture stripped)
@@ -92,7 +94,7 @@ app/
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 tenants, 1 superseded doc — the fixture
-tests/               executable proof of each claim — 39 tests
+tests/               executable proof of each claim — 63 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -141,11 +143,42 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | 1.1 | Async is occupancy, not speed | ✅ |
 | 1.2 | Pydantic contracts at both boundaries | ✅ |
 | 1.3 | Streaming without lying about it | ✅ `POST /v1/chat/stream` |
-| 1.4 | Resilience: semaphore, jittered retry, breaker | ⬜ TODOs in `azure.py` |
+| 1.4 | Resilience: semaphore, jittered retry, breaker | ✅ `llm/resilience.py`, `loadtest.py` |
 | 3.1 | Chunking as information architecture | ✅ |
 | 3.2 | ANN indexes: recall/latency/memory | ✅ |
 | 3.3 | Hybrid search + RRF | ✅ |
 | 3.4 | Metadata gates + the refusal path | ✅ `gated.py`, `calibrate.py` |
+
+---
+
+## The semaphore made throughput *worse*, and that's the interesting part
+
+`loadtest.py`, 30 concurrent requests against a 429-injecting provider:
+
+| config | ok | 429 | shed | p99 ms | calls that reached the provider |
+|---|---|---|---|---|---|
+| no controls | 0 | 30 | 0 | 56 | 30 |
+| retry only | **30** | 0 | 0 | 160 | **60** |
+| retry + semaphore | 8 | 8 | 14 | 537 | 48 |
+
+Retry-only serves everyone — by putting **60 calls** into a provider that is
+already saying *"over quota"*. Adding the semaphore served **fewer**. Two reasons,
+both measured, neither a bug:
+
+1. **A retry holds its slot while it sleeps.** A request backing off for 0.4s
+   occupies its slot for the full 0.4s (`test_a_retry_holds_its_semaphore_slot_while_backing_off`).
+   That's correct — the cap counts calls that *will* hit the provider, and a
+   backing-off request certainly will. Release the slot and the cap is a lie:
+   100 requests could wake at once. So **concurrency and retry interact
+   multiplicatively**: `cap × (1 + retries × backoff)` bounds throughput.
+2. **Under sustained overload you cannot serve everyone.** The real choice is
+   *everyone waits and some time out* vs *some are served and the rest are told
+   "come back in 2s" in half a second*. That's the trade, stated.
+
+Related: `CapacityShed` exists because the first loadtest reported the provider's
+429s as "shed" — a metric that says *"raise your concurrency cap"* when the answer
+is *"the provider is out of quota"*. **A metric that can't tell you which system
+said no is not a metric.**
 
 ---
 

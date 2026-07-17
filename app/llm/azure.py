@@ -13,6 +13,10 @@ they are the spec.
 
 from typing import AsyncIterator        # stdlib — stream_chat's return type
 
+import httpx                             # 3rd-party: httpx — Timeout(), so we can set the
+                                        #   CONNECT timeout separately from the total.
+                                        #   (openai uses httpx underneath.)
+
 from openai import (                     # 3rd-party: openai — the official SDK. Note every
                                         #   name here is an EXCEPTION type except the clients,
                                         #   because _translate() maps them onto our own taxonomy.
@@ -26,6 +30,7 @@ from openai import (                     # 3rd-party: openai — the official SD
 )
 
 from app.config import Settings          # local — app/config.py
+from app.llm.resilience import ResilientCaller  # local — app/llm/resilience.py (1.4)
 from app.llm.base import (               # local — app/llm/base.py: OUR error taxonomy + wire
                                         #   types. Every openai.* exception above dies in
                                         #   _translate() and is reborn as one of these.
@@ -84,24 +89,32 @@ class AzureLLMClient:
             #   connect  — a second or two. A TCP handshake that slow is a dead host.
             #   total    — sized to your longest LEGITIMATE generation.
             # No timeout means a hung socket holds a concurrency slot forever.
-            timeout=settings.llm_timeout_seconds,
+            timeout=httpx.Timeout(
+                settings.llm_timeout_seconds,
+                connect=settings.llm_connect_timeout_seconds,
+            ),
             max_retries=0,  # we own retry policy; the SDK's is invisible to our metrics
         )
 
-        # TODO(1.4): asyncio.Semaphore(settings.llm_max_concurrency)
-        #   Cap in-flight calls from this process. Shed excess with our OWN 429 +
-        #   Retry-After. Rejecting a request in 5ms is kinder than timing it out
-        #   in 60 seconds — and it stops a thousand coroutines queueing to die.
-        #
-        # TODO(1.4): retry with FULL JITTER, honouring Retry-After.
-        #   Retry: RateLimited, ProviderUnavailable.
-        #   Never: BadRequest, ContentFiltered. They are deterministic refusals;
-        #          retrying burns quota to be told no again.
-        #   Jitter is not optional: fifty pods retrying after exactly 2s is a
-        #          self-inflicted DDoS that re-synchronises on every cycle.
-        #
-        # TODO(1.4): circuit breaker. After N consecutive failures, stop calling
-        #   for a window. Stops one degraded region eating the whole thread budget.
+        # Section 1.4 — the four controls, composed. ONE object, because they are
+        # all properties of the same thing: our relationship with this provider.
+        #   breaker  → should we call at all?   (Azure's health)
+        #   semaphore→ how many at once?        (our in-flight count)
+        #   retry    → jitter + honour Retry-After
+        #   timeout  → set on the client above (connect + total, two of them)
+        self._resilient = ResilientCaller(
+            max_concurrency=settings.llm_max_concurrency,
+            max_retries=settings.llm_max_retries,
+            acquire_timeout=settings.llm_acquire_timeout_seconds,
+            breaker_threshold=settings.llm_breaker_threshold,
+            breaker_cooldown=settings.llm_breaker_cooldown_seconds,
+        )
+
+    @property
+    def stats(self):
+        """What the boundary is doing. "Add resilience" is unfalsifiable without
+        numbers — these are the columns loadtest.py prints."""
+        return self._resilient.stats
 
     # -------------------------------------------------------------------------
     async def stream_chat(
@@ -111,73 +124,99 @@ class AzureLLMClient:
         temperature: float = 0.0,
         max_tokens: int = 512,
     ) -> AsyncIterator[TokenChunk]:
-        try:
-            stream = await self._client.chat.completions.create(
-                # This is the DEPLOYMENT NAME you chose in Azure, not the model
-                # name. A deployment called "prod-chat" may point at gpt-4o.
-                # The `model=` kwarg is a lie inherited from the OpenAI SDK.
-                model=self._settings.azure_openai_chat_deployment,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                # max_tokens is a QUOTA decision, not just a length cap.
-                # Azure reserves prompt_tokens + max_tokens against your TPM at
-                # ADMISSION time. max_tokens=4096 on a route whose answers average
-                # 180 tokens throws away ~95% of your quota on every call — you
-                # eat 429s at 40% real utilisation. Set it honestly per route.
-                max_tokens=max_tokens,
-                stream=True,
-                # Without this, streaming responses carry NO usage block, and you
-                # cannot answer "what does one request cost?" — asked every time.
-                stream_options={"include_usage": True},
-            )
+        """Stream tokens, holding ONE concurrency slot for the whole stream.
 
-            async for event in stream:
-                # The final usage event has an empty `choices` list.
-                if event.usage is not None:
-                    yield TokenChunk(
-                        text="",
-                        usage=Usage(
-                            prompt_tokens=event.usage.prompt_tokens,
-                            completion_tokens=event.usage.completion_tokens,
-                        ),
-                    )
-                    continue
+        NOTE WHAT IS AND IS NOT RETRIED HERE. We retry the CONNECT — nobody has
+        seen anything yet, so a 429 before the first token is safely retryable.
+        We do NOT retry once tokens are flowing: the client already has them, and
+        a retry would re-emit them. A mid-stream failure becomes an in-band error
+        frame instead (section 1.3), which is why `_sse_events` catches LLMError.
 
-                if not event.choices:
-                    continue
-                delta = event.choices[0].delta
-                if delta and delta.content:
-                    yield TokenChunk(text=delta.content)
+        The slot is held across the whole `async for`, not just the connect —
+        an in-flight stream IS in-flight work, and the semaphore must know.
+        """
+        async def _connect():
+            try:
+                return await self._client.chat.completions.create(
+                    # This is the DEPLOYMENT NAME you chose in Azure, not the model
+                    # name. A deployment called "prod-chat" may point at gpt-4o.
+                    # The `model=` kwarg is a lie inherited from the OpenAI SDK.
+                    model=self._settings.azure_openai_chat_deployment,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    # max_tokens is a QUOTA decision, not just a length cap.
+                    # Azure reserves prompt_tokens + max_tokens against your TPM at
+                    # ADMISSION time. max_tokens=4096 on a route whose answers average
+                    # 180 tokens throws away ~96% of every reservation — you eat
+                    # 429s while your dashboard shows 4%. Set it honestly per route.
+                    max_tokens=max_tokens,
+                    stream=True,
+                    # Without this, streaming responses carry NO usage block, and you
+                    # cannot answer "what does one request cost?" — asked every time.
+                    stream_options={"include_usage": True},
+                )
+            except Exception as exc:  # noqa: BLE001 — translate at the seam
+                raise _translate(exc) from exc
 
-        except Exception as exc:  # noqa: BLE001 — deliberate: translate, then re-raise
-            raise _translate(exc) from exc
+        async with self._resilient.slot():          # breaker + semaphore, held throughout
+            stream = await self._resilient.attempt(_connect)   # retry the CONNECT only
+            try:
+                async for event in stream:
+                    # The final usage event has an empty `choices` list.
+                    if event.usage is not None:
+                        yield TokenChunk(
+                            text="",
+                            usage=Usage(
+                                prompt_tokens=event.usage.prompt_tokens,
+                                completion_tokens=event.usage.completion_tokens,
+                            ),
+                        )
+                        continue
+
+                    if not event.choices:
+                        continue
+                    delta = event.choices[0].delta
+                    if delta and delta.content:
+                        yield TokenChunk(text=delta.content)
+            except Exception as exc:  # noqa: BLE001 — translate, do NOT retry
+                self._resilient.breaker.on_failure()
+                raise _translate(exc) from exc
 
     # -------------------------------------------------------------------------
     async def extract(self, text: str, schema: dict, *, max_tokens: int = 512) -> str:
-        try:
-            resp = await self._client.chat.completions.create(
-                model=self._settings.azure_openai_chat_deployment,
-                messages=[
-                    {"role": "system", "content": "Extract invoice fields. Cite the page."},
-                    {"role": "user", "content": text},
-                ],
-                temperature=0.0,
-                max_tokens=max_tokens,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "invoice_extract",
-                        # `schema` is InvoiceExtract.model_json_schema() — the
-                        # Pydantic class emits its own JSON Schema, so the contract
-                        # we send Azure can never drift from the class we validate
-                        # against. Define the shape once, in Python.
-                        "schema": schema,
-                        "strict": True,
+        """A UNARY call — safe to retry whole, because nobody saw the failed one.
+
+        Contrast stream_chat above, where only the connect may be retried. Retry
+        safety is a property of the OPERATION, not of the error.
+        """
+
+        async def _do():
+            try:
+                return await self._client.chat.completions.create(
+                    model=self._settings.azure_openai_chat_deployment,
+                    messages=[
+                        {"role": "system", "content": "Extract invoice fields. Cite the page."},
+                        {"role": "user", "content": text},
+                    ],
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "invoice_extract",
+                            # `schema` is InvoiceExtract.model_json_schema() — the
+                            # Pydantic class emits its own JSON Schema, so the contract
+                            # we send Azure can never drift from the class we validate
+                            # against. Define the shape once, in Python.
+                            "schema": schema,
+                            "strict": True,
+                        },
                     },
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise _translate(exc) from exc
+                )
+            except Exception as exc:  # noqa: BLE001 — translate at the seam
+                raise _translate(exc) from exc
+
+        resp = await self._resilient.call(_do)   # breaker → semaphore → retry+jitter
 
         # Return the RAW STRING. Not a dict. Not a parsed model.
         #
