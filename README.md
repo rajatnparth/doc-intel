@@ -16,9 +16,13 @@ git clone https://github.com/rajatnparth/doc-intel && cd doc-intel
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # defaults to a stub provider — no Azure key needed
-pytest -q                       # 78 tests. First run downloads ~210MB of local
+python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
+                                # the API has NO default secret and refuses to
+                                # boot without one — so you generate a real one
+pytest -q                       # 80 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
-                                # no network.
+                                # no network. (Tests mint their own ephemeral
+                                # secret — the suite depends on no fixed value.)
 ```
 
 **No API key required to run any of it.** `LLM_PROVIDER=stub` swaps in a fake
@@ -112,7 +116,7 @@ app/
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 superseded policy kit — the fixture
-tests/               executable proof of each claim — 78 tests
+tests/               executable proof of each claim — 80 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -151,6 +155,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | **Pre**-filter on `tenant_id`, never post-filter | `tenant_id` is a security boundary, not a relevance signal. Post-filtering returns the right answer *and* leaks — see `gated_demo.py`. A control that depends on the ordering of two function calls is not a control. |
 | A refusal is a return value, not an exception | `Answer(refused=True, score=...)` — the caller can't forget to handle it, and the score is always reported. On a refusal the generator is **never called**: handed confident-looking irrelevant chunks, models answer anyway. |
 | The seam is a **test**, not a convention | A rule that lives in a README gets violated by the author within the month — measured: it did. `test_seam.py` parses every module's AST, so a lazy `import fastembed` inside a helper function fails CI the same as a top-level one. |
+| `AUTH_JWT_SECRET` has **no default** — boot fails without it | A service that *can* start in an unsafe state *will* be run in an unsafe state. A boot warning is a log line you grep for after the incident; a boot failure is a deploy that never went out wrong. The only default secret is no secret. |
 
 ---
 
@@ -211,9 +216,16 @@ attack has a test). Phase 1's `tenant_id` body field didn't just stop working;
 with `extra="forbid"` it now 422s, so no client keeps believing it controls its
 tenant. Sabotage note: flipping `verify_signature: False` silently disabled
 three defenses at once (PyJWT couples them) — and three tests went red, which
-is why forged, expired, and cross-audience tokens each have their own. Dev
-tokens use HS256 and a boot-warned default secret; the enterprise swap
-(IdP-signed RS256 + JWKS) lands entirely inside `get_principal`.
+is why forged, expired, and cross-audience tokens each have their own.
+
+**There is no default secret.** `AUTH_JWT_SECRET` has no fallback value:
+`validate_for_serving()` refuses to boot the API without one — fail closed at
+boot, with the fix in the error message, not at 3am when `jwt.decode(token,
+None)` verifies nothing. Tests generate an ephemeral secret per run, so the
+suite provably depends on no fixed value. `/v1/chat/stream` is authenticated
+too: it has no tenancy, but an unmetered passthrough to a paid model is a cost
+hole, and "who spent this?" needs an answer on every request. The enterprise
+swap (IdP-signed RS256 + JWKS) lands entirely inside `get_principal`.
 
 ---
 

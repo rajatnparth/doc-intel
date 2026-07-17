@@ -71,11 +71,14 @@ class Settings(BaseSettings):
     # makes answers worse AND more expensive at the same time.
     ask_context_chars: int = Field(6_000, ge=500)
 
-    # HS256 signing secret for /v1/ask bearer tokens. The default is designed
-    # to be SEEN: its value says what it is, and lifespan logs a warning when a
-    # process boots with it. Production replaces this whole scheme with the
-    # IdP's RS256/JWKS keys — see app/auth.py.
-    auth_jwt_secret: str = Field("dev-secret-do-not-deploy", min_length=8)
+    # HS256 signing secret for bearer tokens. DELIBERATELY NO DEFAULT: the only
+    # acceptable default secret is no secret. A service that can start in an
+    # unsafe state will be run in an unsafe state — so the API refuses to boot
+    # without one (validate_for_serving), while the retrieval demos, which
+    # never touch auth, stay keyless. Generate one:
+    #   python -c "import secrets; print(secrets.token_hex(32))"
+    # Production replaces this scheme with the IdP's RS256/JWKS keys (app/auth.py).
+    auth_jwt_secret: str | None = None
 
     def validate_for_provider(self) -> None:
         """Fail fast if we're told to use Azure but weren't given credentials.
@@ -115,6 +118,29 @@ class Settings(BaseSettings):
                     f"EMBEDDING_PROVIDER=azure but these are unset: {', '.join(missing)}. "
                     f"See AZURE_SETUP.md."
                 )
+
+    def validate_for_serving(self) -> None:
+        """Everything validate_for_provider checks, PLUS what only the API
+        needs. Split from it on purpose: the retrieval demos call the provider
+        factories but never serve HTTP, and demanding an auth secret from
+        `python hybrid_demo.py` would be a requirement with no requirer.
+
+        Fail closed, at boot, with the fix in the message — not at 3am with a
+        stack trace from jwt.decode(None).
+        """
+        self.validate_for_provider()
+
+        if not self.auth_jwt_secret:
+            raise RuntimeError(
+                "AUTH_JWT_SECRET is not set. The API will not serve without one — "
+                "there is no default secret, by design. Generate one:\n"
+                '  python -c "import secrets; print(f\'AUTH_JWT_SECRET={secrets.token_hex(32)}\')" >> .env'
+            )
+        if len(self.auth_jwt_secret) < 32:
+            raise RuntimeError(
+                "AUTH_JWT_SECRET is shorter than 32 chars. HS256 is only as strong "
+                "as this string is unguessable — use secrets.token_hex(32)."
+            )
 
 
 @lru_cache

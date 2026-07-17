@@ -54,12 +54,6 @@ log = logging.getLogger("doc_intel.auth")
 ALGORITHM = "HS256"
 AUDIENCE = "doc-intel"
 
-# The default in config.py. Its NAME is its documentation; lifespan logs a
-# warning whenever the process boots with it. Visible scaffolding, like the
-# body-principal was — except now the unsafe part is a VALUE you rotate, not a
-# DESIGN you rebuild.
-DEV_SECRET = "dev-secret-do-not-deploy"
-
 # auto_error=False: HTTPBearer's own error is a 403 with no WWW-Authenticate,
 # which gets both halves of RFC 7235 wrong for a missing credential. We take
 # `None` and shape the 401 ourselves.
@@ -95,6 +89,13 @@ def get_principal(
     if credentials is None:
         raise _unauthorized("no bearer token presented")
 
+    if not settings.auth_jwt_secret:
+        # Unreachable when the app booted through lifespan (validate_for_serving
+        # refuses to start without a secret). Kept because "unreachable" is a
+        # claim about today's wiring, and jwt.decode(token, None) would VERIFY
+        # NOTHING rather than fail — the one failure mode worse than crashing.
+        raise RuntimeError("AUTH_JWT_SECRET is not configured; refusing to verify tokens")
+
     try:
         claims = jwt.decode(
             credentials.credentials,
@@ -124,9 +125,12 @@ PrincipalDep = Annotated[Principal, Depends(get_principal)]
 
 
 # =============================================================================
-# The dev minter. In production this function DOES NOT EXIST — tokens come
-# from the IdP, and the verifier holding a signing key would itself be a
-# finding. It lives here so the quickstart stays keyless:
+# The minter — an OPERATOR tool, not a backdoor. It signs with the same secret
+# the verifier holds, so it grants nothing that possession of the secret
+# doesn't already grant: whoever can read AUTH_JWT_SECRET can forge tokens
+# with or without this CLI. Under RS256/JWKS this file loses the ability to
+# mint at all (the private key lives at the IdP), and only get_principal
+# remains — which is the correct end state.
 #
 #     TOKEN=$(python -m app.auth --tenant asha --groups customer)
 # =============================================================================
@@ -146,19 +150,28 @@ def mint(
 
 
 if __name__ == "__main__":
-    import argparse                     # stdlib — CLI for the dev minter only
+    import argparse                     # stdlib — CLI for the minter only
+    import sys                          # stdlib — exit with a message, not a traceback
 
-    parser = argparse.ArgumentParser(description="Mint a DEV token (never in production).")
+    parser = argparse.ArgumentParser(description="Mint a token with the configured signing secret.")
     parser.add_argument("--tenant", default="asha")
     parser.add_argument("--groups", default="customer", help="comma-separated, e.g. customer or agent")
     parser.add_argument("--ttl", type=int, default=3600)
     args = parser.parse_args()
 
+    secret = get_settings().auth_jwt_secret
+    if not secret:
+        sys.exit(
+            "AUTH_JWT_SECRET is not set — same requirement the API enforces at boot. "
+            "Generate one:\n"
+            '  python -c "import secrets; print(f\'AUTH_JWT_SECRET={secrets.token_hex(32)}\')" >> .env'
+        )
+
     print(
         mint(
             args.tenant,
             [g.strip() for g in args.groups.split(",") if g.strip()],
-            secret=get_settings().auth_jwt_secret,
+            secret=secret,
             ttl_seconds=args.ttl,
         )
     )

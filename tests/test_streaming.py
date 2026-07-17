@@ -11,6 +11,8 @@ import pytest                           # 3rd-party: pytest — @pytest.mark.asy
 from fastapi.testclient import TestClient  # 3rd-party: fastapi — in-process HTTP client
 
 from app.llm.stub import FaultMode, StubLLMClient  # local — app/llm/stub.py
+from app.auth import mint                          # local — app/auth.py (token minter)
+from app.config import get_settings                # local — app/config.py
 from app.main import _llm_frames, app, get_llm     # local — app/main.py (generator, app, DI dep)
 from app.schemas import ChatStreamRequest          # local — app/schemas.py
 
@@ -30,6 +32,13 @@ def parse_frames(body: str) -> list[str]:
     return out
 
 
+def _auth() -> dict:
+    """/v1/chat/stream is authenticated since the production-hardening pass —
+    an unmetered passthrough to a paid model is a cost hole."""
+    token = mint("asha", ["customer"], secret=get_settings().auth_jwt_secret)
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _client_with(stub: StubLLMClient) -> TestClient:
     """Inject a stub via FastAPI's dependency_overrides.
 
@@ -46,7 +55,7 @@ def _client_with(stub: StubLLMClient) -> TestClient:
 def test_stream_emits_tokens_then_done_with_usage() -> None:
     stub = StubLLMClient(token_delay=0.0)
     with _client_with(stub) as client:
-        r = client.post("/v1/chat/stream", json={"prompt": "hi", "max_tokens": 4})
+        r = client.post("/v1/chat/stream", json={"prompt": "hi", "max_tokens": 4}, headers=_auth())
 
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
@@ -77,7 +86,7 @@ def test_stream_emits_tokens_then_done_with_usage() -> None:
 def test_mid_stream_error_arrives_as_a_frame_not_a_500() -> None:
     stub = StubLLMClient(token_delay=0.0, default_fault=FaultMode.MID_STREAM_ERROR)
     with _client_with(stub) as client:
-        r = client.post("/v1/chat/stream", json={"prompt": "hi", "max_tokens": 8})
+        r = client.post("/v1/chat/stream", json={"prompt": "hi", "max_tokens": 8}, headers=_auth())
 
     # The status code is 200. It was sent before the model wrote a word.
     # There is no universe in which this is a 500.
@@ -106,7 +115,7 @@ def test_content_filter_is_marked_not_retryable() -> None:
     """The distinction the HTTP status code cannot express."""
     stub = StubLLMClient(token_delay=0.0, default_fault=FaultMode.CONTENT_FILTER)
     with _client_with(stub) as client:
-        r = client.post("/v1/chat/stream", json={"prompt": "hi"})
+        r = client.post("/v1/chat/stream", json={"prompt": "hi"}, headers=_auth())
 
     events = [json.loads(p) for p in parse_frames(r.text) if p != "[DONE]"]
     err = next(e for e in events if e["type"] == "error")
@@ -190,7 +199,7 @@ async def test_disconnect_cancels_the_upstream_call() -> None:
 def test_every_frame_ends_with_a_blank_line() -> None:
     stub = StubLLMClient(token_delay=0.0)
     with _client_with(stub) as client:
-        r = client.post("/v1/chat/stream", json={"prompt": "hi", "max_tokens": 2})
+        r = client.post("/v1/chat/stream", json={"prompt": "hi", "max_tokens": 2}, headers=_auth())
 
     # A single \n means the client blocks forever waiting for the frame to end.
     assert r.text.endswith("\n\n")

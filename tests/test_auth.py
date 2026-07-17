@@ -80,6 +80,39 @@ def test_wrong_audience_is_401() -> None:
 
 
 # =============================================================================
+# Fail closed, everywhere it matters.
+# =============================================================================
+def test_chat_stream_requires_auth_too() -> None:
+    """The cost-hole route: /v1/chat/stream has no tenancy, but an unmetered
+    passthrough to a paid model still needs a WHO for every request."""
+    with TestClient(app) as client:
+        r = client.post("/v1/chat/stream", json={"prompt": "hi"})
+    assert r.status_code == 401
+    assert r.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_serving_refuses_to_boot_without_a_secret() -> None:
+    """There is no default secret — the API must fail AT BOOT, with the fix in
+    the message, not at 3am when jwt.decode(token, None) verifies nothing."""
+    from app.config import Settings
+
+    with_no_secret = Settings(auth_jwt_secret=None)
+    try:
+        with_no_secret.validate_for_serving()
+        raise AssertionError("validate_for_serving accepted a missing secret")
+    except RuntimeError as exc:
+        assert "AUTH_JWT_SECRET" in str(exc)
+        assert "secrets.token_hex" in str(exc), "the error must carry its own fix"
+
+    short = Settings(auth_jwt_secret="tooshort")
+    try:
+        short.validate_for_serving()
+        raise AssertionError("validate_for_serving accepted an 8-char secret")
+    except RuntimeError as exc:
+        assert "32" in str(exc)
+
+
+# =============================================================================
 # The old, unsafe shape is REJECTED, not ignored.
 # =============================================================================
 def test_tenant_id_in_body_is_now_a_422() -> None:
