@@ -105,7 +105,7 @@ app/
   schemas.py         The two contracts (Gate 1: clients. Gate 2: the model.)
   sse.py             The streaming protocol: discriminated frames + [DONE]
   auth.py            JWT -> Principal. The only request-path place one is built.
-  router.py          Numbers vs wording, deterministically. The agents lesson, model removed.
+  router.py          Numbers vs wording: tier 1 deterministic, tier 2 an LLM verdict behind Gate 2.
   policy_admin.py    The system of record (Protocol + stub). Numbers live HERE.
   rag.py             The context budget: parents deduped, chars capped, [n] cited
   main.py            FastAPI app, DI, error envelope, routes (incl. /v1/ask)
