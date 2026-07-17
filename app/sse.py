@@ -79,6 +79,23 @@ class SourcesEvent(BaseModel):
     sources: list[SourceRef]
 
 
+class FactItem(BaseModel):
+    name: str                           # human label, e.g. "Own damage excess"
+    value: str
+
+
+class FactsEvent(BaseModel):
+    """An answer from the SYSTEM OF RECORD — no model involved, and the frame
+    says so. `source` is not decoration: a client (and an auditor) must be
+    able to tell a generated sentence from a record lookup at a glance,
+    because only one of them can be wrong in the interesting way."""
+
+    type: Literal["facts"] = "facts"
+    policy_number: str
+    facts: list[FactItem]
+    source: Literal["policy_admin"] = "policy_admin"
+
+
 class RefusalEvent(BaseModel):
     """A refusal is an OUTCOME, not an error — same reasoning that made
     mid-stream failures in-band frames instead of status codes. The score is

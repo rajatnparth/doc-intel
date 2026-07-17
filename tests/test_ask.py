@@ -161,14 +161,18 @@ def test_refusal_never_calls_the_generator(fake_llm) -> None:
 
 
 # =============================================================================
-# Tenant scoping at the route level (the body-principal is phase-1 scaffolding,
-# but the GATE behind it is real either way).
+# Tenant scoping at the route level. Since phase 4 a present-tense excess
+# question routes to the SYSTEM OF RECORD — so this test moved to a dated
+# wording question, which still exercises the retrieval path.
 # =============================================================================
 def test_ask_is_tenant_scoped(fake_llm) -> None:
     with TestClient(app) as client:
         r = client.post(
             "/v1/ask",
-            json={"question": "what is my excess for an own damage claim?"},
+            json={
+                "question": "what is my excess for an own damage claim?",
+                "as_of": "2026-07-01",
+            },
             headers=auth(tenant="vikram"),
         )
 
@@ -182,17 +186,19 @@ def test_ask_is_tenant_scoped(fake_llm) -> None:
 
 
 def test_as_of_time_travels_the_answer(fake_llm) -> None:
-    """Route-level date-of-loss: the SAME question, asked about December,
-    must be answered from December's wording — all the way into the prompt
-    the model reads."""
+    """Route-level date-of-loss: the SAME question at two dates must be
+    answered from the wording in force at each — all the way into the prompt
+    the model reads. Both legs pass as_of, which (phase 4) is also what keeps
+    a dated value question OUT of the facts path: the stub record only knows
+    the current term, and the wording archive is what can time-travel."""
     q = {"question": "what is my excess for an own damage claim?"}
     with TestClient(app) as client:
-        client.post("/v1/ask", json=q, headers=auth())
+        client.post("/v1/ask", json={**q, "as_of": "2026-07-01"}, headers=auth())
         client.post("/v1/ask", json={**q, "as_of": "2025-12-20"}, headers=auth())
 
     assert fake_llm.stream_chat_calls == 2
-    today_prompt, december_prompt = fake_llm.prompts
-    assert "₹2,000" in today_prompt and "₹1,000" not in today_prompt
+    current_prompt, december_prompt = fake_llm.prompts
+    assert "₹2,000" in current_prompt and "₹1,000" not in current_prompt
     assert "₹1,000" in december_prompt and "₹2,000" not in december_prompt
 
 

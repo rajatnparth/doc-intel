@@ -24,7 +24,11 @@ from app.auth import PrincipalDep                       # local — app/auth.py 
 from app.config import Settings, get_settings          # local — app/config.py
 from app.llm.base import LLMClient, LLMError, Usage     # local — app/llm/base.py (the seam)
 from app.llm.factory import build_llm_client            # local — app/llm/factory.py
+from app.policy_admin import PolicyAdmin, StubPolicyAdmin  # local — app/policy_admin.py
+                                        #   (the system of record — numbers live here)
 from app.rag import build_prompt, select_sources        # local — app/rag.py (the context budget)
+from app.router import FIELD_LABELS, FactField, classify  # local — app/router.py
+                                        #   (numbers-vs-wording, deterministically)
 from app.retrieval.corpus import load_corpus            # local — app/retrieval/corpus.py (fixture)
 from app.retrieval.gated import Principal, PreFilterRetriever, answer  # local —
                                         #   app/retrieval/gated.py (gates + refusal)
@@ -32,6 +36,8 @@ from app.schemas import AskRequest, ChatStreamRequest, ErrorBody, ErrorEnvelope 
 from app.sse import (                   # local — app/sse.py (the wire protocol)
     DoneEvent,
     ErrorEvent,
+    FactItem,
+    FactsEvent,
     RefusalEvent,
     SourceRef,
     SourcesEvent,
@@ -74,6 +80,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # in a threadpool — see _ask_events). Phase 5 replaces load_corpus() with a
     # real document store + vector DB; this line is the only place that knows.
     app.state.retriever = PreFilterRetriever(load_corpus())
+
+    # The system of record — the stub against the fixture corpus. A real
+    # deployment swaps in a connector to the insurer's core system; the
+    # PolicyAdmin Protocol is the plug, and this line is the socket.
+    app.state.policy_admin = StubPolicyAdmin()
     try:
         yield
     finally:
@@ -104,11 +115,16 @@ def get_retriever(request: Request) -> PreFilterRetriever:
     return request.app.state.retriever
 
 
+def get_policy_admin(request: Request) -> PolicyAdmin:
+    return request.app.state.policy_admin
+
+
 # `Annotated[X, Depends(f)]` is the modern spelling of `x: X = Depends(f)`.
 # It's preferred because the dependency lives in the TYPE, so the parameter can
 # still have a real default, and the annotation is reusable.
 LLMDep = Annotated[LLMClient, Depends(get_llm)]
 RetrieverDep = Annotated[PreFilterRetriever, Depends(get_retriever)]
+PolicyAdminDep = Annotated[PolicyAdmin, Depends(get_policy_admin)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 
@@ -299,6 +315,7 @@ async def chat_stream(
 async def _ask_events(
     llm: LLMClient,
     retriever: PreFilterRetriever,
+    policy_admin: PolicyAdmin,
     settings: Settings,
     principal: Principal,
     req: AskRequest,
@@ -309,6 +326,36 @@ async def _ask_events(
     # the only request-path place a Principal is constructed. The body-field
     # version of this line is gone, and schemas.py rejects clients still
     # sending it.
+
+    # ROUTE FIRST: is this a question about a VALUE the system of record holds?
+    # Facts never come from prose — calibrate.py measured why (a premium
+    # question scored 0.7785 against a section that merely DISCUSSES premiums).
+    # The record lookup is keyed by the VERIFIED tenant: isolation extends to
+    # structured data, not just documents.
+    # …and only for PRESENT-TENSE questions. The stub record holds the CURRENT
+    # term; a question anchored to a past date (as_of) needs the record as of
+    # that date, which this connector cannot serve — but the effective-dated
+    # wording archive can. A real core system supports as-of queries; when the
+    # connector grows that, this condition is where the routing widens.
+    field = classify(req.question)
+    if field is not None and req.as_of is None:
+        record = policy_admin.get_record(principal.tenant_id)
+        if record is None:
+            # No record, and falling through to RAG would answer a numbers
+            # question from prose — the exact thing this router forbids.
+            yield frame(RefusalEvent(score=0.0, reason="no policy record on file", near_misses=[]))
+        else:
+            facts = [FactItem(name=FIELD_LABELS[field], value=str(getattr(record, field.value)))]
+            if field is FactField.ANNUAL_PREMIUM:
+                # "What will next year's premium be?" — the honest answer is
+                # the current premium plus WHEN it changes. Next year's number
+                # does not exist yet, in any subsystem.
+                facts.append(FactItem(name=FIELD_LABELS[FactField.RENEWAL_DATE], value=str(record.renewal_date)))
+            log.info("ask routed to policy_admin: %s", field.value, extra={"request_id": request_id})
+            yield frame(FactsEvent(policy_number=record.policy_number, facts=facts))
+        yield frame(DoneEvent(usage=None))   # no usage: NO MODEL WAS CALLED
+        yield done_frame()
+        return
 
     # Embedding the query, building a first-use index view, and cross-encoding
     # 20 candidates are all CPU-bound. Run them inline and they block the event
@@ -371,18 +418,20 @@ async def ask(
     principal: PrincipalDep,
     llm: LLMDep,
     retriever: RetrieverDep,
+    policy_admin: PolicyAdminDep,
     settings: SettingsDep,
 ) -> StreamingResponse:
-    """Retrieve -> gate -> refuse or cite + generate, streamed.
+    """Route -> facts from the system of record, OR retrieve -> gate ->
+    refuse or cite + generate. Streamed either way.
 
     Still no retry loop, no semaphore, no `openai` import, no prompt template —
-    and now also no retrieval logic, no threshold, and no token parsing. Each
-    lives where a second consumer can reach it. Note the 401 happens BEFORE
-    this body runs: an unauthenticated request never touches the retriever,
-    the models, or the corpus."""
+    and now also no retrieval logic, no threshold, no token parsing, and no
+    intent patterns. Each lives where a second consumer can reach it. Note the
+    401 happens BEFORE this body runs: an unauthenticated request never
+    touches the retriever, the record store, the models, or the corpus."""
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     return StreamingResponse(
-        _ask_events(llm, retriever, settings, principal, req, request, request_id),
+        _ask_events(llm, retriever, policy_admin, settings, principal, req, request, request_id),
         media_type="text/event-stream",
         headers={**SSE_HEADERS, "x-request-id": request_id},
     )

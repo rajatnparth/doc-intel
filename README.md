@@ -20,7 +20,7 @@ cp .env.example .env            # defaults to a stub provider — no Azure key n
 python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
                                 # the API has NO default secret and refuses to
                                 # boot without one — so you generate a real one
-pytest -q                       # 83 tests. First run downloads ~210MB of local
+pytest -q                       # 91 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network. (Tests mint their own ephemeral
                                 # secret — the suite depends on no fixed value.)
@@ -52,7 +52,10 @@ bearer token is minted locally with the dev secret):
 TOKEN=$(python -m app.auth --tenant asha --groups customer)
 curl -N localhost:8000/v1/ask -X POST \
   -H 'content-type: application/json' -H "Authorization: Bearer $TOKEN" \
-  -d '{"question": "how quickly must I report an accident?"}'
+  -d '{"question": "how quickly must I report an accident?"}'   # wording -> RAG
+curl -N localhost:8000/v1/ask -X POST \
+  -H 'content-type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"question": "what is my excess?"}'                        # value -> the record, 0 tokens
 ```
 
 **`gated_demo.py`** — two policyholders on the same motor product. Pre-filtering
@@ -102,6 +105,8 @@ app/
   schemas.py         The two contracts (Gate 1: clients. Gate 2: the model.)
   sse.py             The streaming protocol: discriminated frames + [DONE]
   auth.py            JWT -> Principal. The only request-path place one is built.
+  router.py          Numbers vs wording, deterministically. The agents lesson, model removed.
+  policy_admin.py    The system of record (Protocol + stub). Numbers live HERE.
   rag.py             The context budget: parents deduped, chars capped, [n] cited
   main.py            FastAPI app, DI, error envelope, routes (incl. /v1/ask)
   llm/
@@ -120,7 +125,7 @@ app/
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
-tests/               executable proof of each claim — 83 tests
+tests/               executable proof of each claim — 91 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -157,6 +162,8 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | `Usage` is a first-class type | *"What does one request cost you?"* is the follow-up question every time. Streaming sends no usage unless you ask. |
 | `_translate()` in `azure.py` | Where every `openai.*` exception dies. If one reaches a handler, the seam leaked. |
 | **Pre**-filter on `tenant_id`, never post-filter | `tenant_id` is a security boundary, not a relevance signal. Post-filtering returns the right answer *and* leaks — see `gated_demo.py`. A control that depends on the ordering of two function calls is not a control. |
+| **Numbers never come from RAG** | `calibrate.py` measured why: "what will next year's renewal premium be?" scored 0.7785 against a section that merely *discusses* premiums — topicality isn't truth, and the number isn't in the corpus at all. Value questions route to the policy-admin record: exact, 0 tokens, and the LLM is provably never called (`ExplodingLLM` in the tests). The refusal wasn't a dead end either: the NCB question RAG correctly refused is answered by the record. |
+| The router is **deterministic**, not an LLM call | A router is a classifier; this is the cheapest one that meets the bar — and it's *explainable to a regulator* ("why did the bot answer from the record?" greps). Intent needs a fact-noun AND a value shape: "what is my excess?" → facts; "does the excess apply to windscreen claims?" → wording. The interface survives the upgrade to function-calling; only the classifier swaps. Known wart, tested rather than hidden: "what is my renewal process?" false-routes. |
 | Effective **windows**, not a status flag | "Active" asks the wrong question. Whether a wording applies is relative to a date — and not today's: a claim is assessed under the wording in force on the **date of loss**. A flag cannot represent that question; `effective_from/to` + `as_of` answer it, and "superseded" becomes a derived fact nobody has to remember to flip. |
 | `as_of` rides in the request body — and `tenant_id` may not | The contrast IS the rule: `tenant_id` *expands* what you may see, so it must arrive signed (JWT). `as_of` only *selects among versions you already own* — a time cursor inside your authorization scope. Which knobs need a signature is a per-knob decision. |
 | A refusal is a return value, not an exception | `Answer(refused=True, score=...)` — the caller can't forget to handle it, and the score is always reported. On a refusal the generator is **never called**: handed confident-looking irrelevant chunks, models answer anyway. |
@@ -181,13 +188,25 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | P1 | `/v1/ask` — retrieval meets generation | ✅ `rag.py`, `test_ask.py` |
 | P2 | Identity: JWT claims → Principal | ✅ `auth.py`, `test_auth.py` |
 | P3 | Effective-dated version gate (`as_of`) | ✅ date-of-loss retrieval |
+| P4 | Numbers-vs-wording router + system of record | ✅ `router.py`, `policy_admin.py` |
 
 ---
 
-## /v1/ask — the RAG loop, wired
+## /v1/ask — the loop, wired
 
-One route: gates → hybrid retrieval → rerank → **refuse or cite + generate**,
-streamed. An answered question looks like this on the wire:
+One route, two pipelines: a deterministic router sends **value questions to the
+system of record** and **wording questions through RAG** (gates → hybrid →
+rerank → refuse or cite + generate). A fact answer is one frame, no model:
+
+```
+data: {"type":"facts","policy_number":"MTR-2026-1147","facts":[{"name":"Own damage excess","value":"₹2,000"}],"source":"policy_admin"}
+data: {"type":"done","usage":null}
+data: [DONE]
+```
+
+The `source` field is not decoration — a client (and an auditor) must be able
+to tell a record lookup from a generated sentence at a glance. A wording
+question looks like this instead:
 
 ```
 data: {"type":"sources","sources":[{"n":1,"doc_title":"Asha Rao — Motor Policy Kit (2026)","heading":"4. Claims Process"}]}
