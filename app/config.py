@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     llm_breaker_threshold: int = Field(5, ge=1)
     llm_breaker_cooldown_seconds: float = Field(30.0, gt=0)
 
+    # /v1/ask context budget, in chars (~4 chars/token). A cost control and an
+    # attention control, not just a window limit: past a point, more context
+    # makes answers worse AND more expensive at the same time.
+    ask_context_chars: int = Field(6_000, ge=500)
+
     def validate_for_provider(self) -> None:
         """Fail fast if we're told to use Azure but weren't given credentials.
 

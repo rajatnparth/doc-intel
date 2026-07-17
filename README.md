@@ -16,7 +16,7 @@ git clone https://github.com/rajatnparth/doc-intel && cd doc-intel
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # defaults to a stub provider — no Azure key needed
-pytest -q                       # 64 tests. First run downloads ~210MB of local
+pytest -q                       # 71 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network.
 ```
@@ -38,6 +38,13 @@ python hybrid_demo.py              # retrieval failures, with real embeddings
 python -m app.retrieval.ann_bench  # the recall you sell for latency, measured
 python chunk_demo.py               # why chunk size is not a number you pick
 uvicorn app.main:app --reload      # then: curl localhost:8000/health
+```
+
+And the loop itself, end to end (stub provider — no key needed):
+
+```bash
+curl -N localhost:8000/v1/ask -X POST -H 'content-type: application/json' \
+  -d '{"question": "how quickly must I report an accident?"}'
 ```
 
 **`gated_demo.py`** — two policyholders on the same motor product. Pre-filtering
@@ -83,7 +90,8 @@ app/
   config.py          Settings from env, validated at BOOT — not at 3am
   schemas.py         The two contracts (Gate 1: clients. Gate 2: the model.)
   sse.py             The streaming protocol: discriminated frames + [DONE]
-  main.py            FastAPI app, DI, error envelope, routes
+  rag.py             The context budget: parents deduped, chars capped, [n] cited
+  main.py            FastAPI app, DI, error envelope, routes (incl. /v1/ask)
   llm/
     base.py          LLMClient + EmbeddingClient + RerankClient Protocols. The seam.
     stub.py          Fault-injecting fake provider (429, mid-stream death, hang)
@@ -100,7 +108,7 @@ app/
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 superseded policy kit — the fixture
-tests/               executable proof of each claim — 64 tests
+tests/               executable proof of each claim — 71 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -154,6 +162,47 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | 3.2 | ANN indexes: recall/latency/memory | ✅ |
 | 3.3 | Hybrid search + RRF | ✅ |
 | 3.4 | Metadata gates + the refusal path | ✅ `gated.py`, `calibrate.py` |
+| P0 | Domain conversion: motor insurance corpus | ✅ `sample_docs/` |
+| P1 | `/v1/ask` — retrieval meets generation | ✅ `rag.py`, `test_ask.py` |
+
+---
+
+## /v1/ask — the RAG loop, wired
+
+One route: gates → hybrid retrieval → rerank → **refuse or cite + generate**,
+streamed. An answered question looks like this on the wire:
+
+```
+data: {"type":"sources","sources":[{"n":1,"doc_title":"Asha Rao — Motor Policy Kit (2026)","heading":"4. Claims Process"}]}
+data: {"type":"token","text":"Accidents "}
+data: {"type":"token","text":"must "}
+...
+data: {"type":"done","usage":{"prompt_tokens":412,"completion_tokens":58}}
+data: [DONE]
+```
+
+A refused one replaces all of that with a single `refusal` frame carrying the
+score, the reason, and near-misses as links. Four decisions worth defending:
+
+- **Sources stream before the first token.** They're known the moment retrieval
+  ends — they come from the retriever, not the model's mouth. The client renders
+  the citations panel while the model is still thinking, and provenance stays
+  honest.
+- **On a refusal the generator is never called** — and that's a claim about a
+  call *not happening*, so `test_ask.py` proves it with a counting fake, and the
+  test goes red if the short-circuit is deleted (sabotage-verified).
+- **Retrieval runs in a threadpool.** Embedding + cross-encoding are CPU-bound;
+  inline in an `async def` they block the event loop and stall every other live
+  stream. Async buys occupancy only if the loop stays free — section 1.1's
+  lesson, biting from the other side.
+- **The prompt is a budget, not a template** (`rag.py`): parents deduped (two
+  chunks from one section must not spend the budget twice), capped in chars,
+  question last. Nothing in `rag.py` imports FastAPI, openai, or a tokenizer.
+
+⚠️ Known scaffolding, marked in the code: the principal currently arrives in the
+request body, which means the client *chooses* its tenant. Unshippable by
+design — phase 2 replaces it with a verified JWT claim. Identity is a property
+of the transport, not the payload.
 
 ---
 

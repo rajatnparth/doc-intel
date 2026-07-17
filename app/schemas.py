@@ -42,12 +42,29 @@ class AskRequest(BaseModel):
     # and a context-window control. An unbounded question is an unbounded bill.
     question: str = Field(..., min_length=1, max_length=8_000)
 
+    # Optional since phase 1: retrieval is corpus-wide behind the tenant gates.
+    # When present it will become a metadata filter once documents have real ids
+    # (phase 5, persistence). A REQUIRED field the server ignores is a lie.
     # Outer Field bounds the list (1..50 items).
     # Inner DocumentId bounds each element (8..64 chars).
-    document_ids: Annotated[list[DocumentId], Field(min_length=1, max_length=50)]
+    document_ids: Annotated[list[DocumentId], Field(min_length=1, max_length=50)] | None = None
+
+    # ⚠️ TEMPORARY SCAFFOLDING — deleted in phase 2 (JWT identity).
+    # Identity in the request BODY means any client can claim to be any tenant.
+    # It exists so /v1/ask is exercisable before auth lands, and for no other
+    # reason. Phase 2 moves the principal into a verified token, where the
+    # caller cannot choose it. Identity is a property of the TRANSPORT, not of
+    # the PAYLOAD.
+    tenant_id: TenantId = "asha"
+    groups: Annotated[list[str], Field(min_length=1, max_length=8)] = ["customer"]
 
     # temperature=2.0 does not error at Azure. It just produces garbage, expensively.
     temperature: float = Field(0.0, ge=0.0, le=1.0)
+
+    # Same quota lesson as ChatStreamRequest: Azure reserves prompt + max_tokens
+    # against TPM at admission time. Sized for a cited answer over policy
+    # extracts, not for an essay.
+    max_tokens: int = Field(400, ge=1, le=4096)
 
 
 class Citation(BaseModel):

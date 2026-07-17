@@ -11,7 +11,7 @@ import pytest                           # 3rd-party: pytest — @pytest.mark.asy
 from fastapi.testclient import TestClient  # 3rd-party: fastapi — in-process HTTP client
 
 from app.llm.stub import FaultMode, StubLLMClient  # local — app/llm/stub.py
-from app.main import _sse_events, app, get_llm     # local — app/main.py (generator, app, DI dep)
+from app.main import _llm_frames, app, get_llm     # local — app/main.py (generator, app, DI dep)
 from app.schemas import ChatStreamRequest          # local — app/schemas.py
 
 
@@ -146,7 +146,15 @@ async def test_disconnect_cancels_the_upstream_call() -> None:
     fake_request = _FakeRequest(disconnect_after=3)
 
     frames = [
-        f async for f in _sse_events(stub, req, fake_request, request_id="rid-1")  # type: ignore[arg-type]
+        f
+        async for f in _llm_frames(
+            stub,
+            prompt=req.prompt,
+            temperature=req.temperature,
+            max_tokens=req.max_tokens,
+            request=fake_request,  # type: ignore[arg-type]
+            request_id="rid-1",
+        )
     ]
 
     # We stopped early. Necessary, but NOT sufficient.

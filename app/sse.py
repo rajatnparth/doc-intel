@@ -56,6 +56,41 @@ class DoneEvent(BaseModel):
     usage: Usage | None = None
 
 
+# -----------------------------------------------------------------------------
+# The frames /v1/ask adds — the "citation" extension this file promised above.
+# Old clients ignore unknown types; that additive-is-safe property is why these
+# can arrive two modules after the protocol shipped.
+# -----------------------------------------------------------------------------
+class SourceRef(BaseModel):
+    """One retrieved source, as the client will see it cited: [n]."""
+
+    n: int
+    doc_title: str
+    heading: str
+
+
+class SourcesEvent(BaseModel):
+    """Sent BEFORE any token. The sources are known the moment retrieval ends —
+    they come from the retriever, not from the model's mouth — so the client can
+    render the citations panel while the model is still thinking. Sending them
+    after the answer would imply the model chose them. It didn't."""
+
+    type: Literal["sources"] = "sources"
+    sources: list[SourceRef]
+
+
+class RefusalEvent(BaseModel):
+    """A refusal is an OUTCOME, not an error — same reasoning that made
+    mid-stream failures in-band frames instead of status codes. The score is
+    always reported (you cannot tune a gate whose number you never see), and
+    near-misses ship as links so a UI can offer 'closest documents' honestly."""
+
+    type: Literal["refusal"] = "refusal"
+    score: float
+    reason: str
+    near_misses: list[SourceRef]
+
+
 def frame(event: BaseModel) -> str:
     """Serialise one Pydantic event into one SSE frame.
 
