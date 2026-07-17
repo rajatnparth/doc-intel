@@ -16,6 +16,7 @@ from __future__ import annotations      # stdlib (special) — lazy annotations;
 
 from dataclasses import dataclass, field  # stdlib — @dataclass for Chunk; field() for the
                                         #   mutable metadata default
+from datetime import date              # stdlib — the effective window on ChunkMeta
 
 from app.ingest.loaders import Section, load_markdown  # local — app/ingest/loaders.py
 
@@ -32,14 +33,24 @@ class ChunkMeta:
 
     tenant_id: str                  # a SECURITY BOUNDARY, not a hint
     acl: frozenset[str]             # group ids permitted to see this chunk
-    status: str = "active"          # "active" | "superseded" — superseded is NOT retrievable
 
-    def visible_to(self, tenant_id: str, groups: frozenset[str]) -> bool:
+    # The validity window. This replaced `status: "active" | "superseded"`,
+    # because "active" asks the wrong question. Whether a policy wording
+    # applies is RELATIVE TO A DATE — and not necessarily today's: a claim is
+    # assessed under the wording in force on the DATE OF LOSS, so a December
+    # accident reported in July is answered from December's kit. A status flag
+    # cannot even represent that question. "Superseded" is now a DERIVED fact
+    # (the window closed), not a stored one somebody must remember to flip.
+    effective_from: date = date.min # first day this version is in force
+    effective_to: date | None = None  # exclusive end; None = still in force
+
+    def visible_to(self, tenant_id: str, groups: frozenset[str], as_of: date) -> bool:
         """The predicate. Kept next to the data it guards, so there is exactly
         one definition of 'visible' in the codebase."""
         return (
             self.tenant_id == tenant_id
-            and self.status == "active"
+            and self.effective_from <= as_of
+            and (self.effective_to is None or as_of < self.effective_to)
             and bool(self.acl & groups)
         )
 

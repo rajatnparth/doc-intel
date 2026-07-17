@@ -1,7 +1,7 @@
 """Section 3.4 — the gate stack and the refusal path.
 
     query + principal
-      → PRE-FILTER (tenant · acl · status)   ← constrains the candidate set
+      → PRE-FILTER (tenant · acl · in-force window)   ← constrains the candidate set
       → hybrid retrieve (dense + BM25 → RRF)
       → cross-encoder rerank                 ← the only ABSOLUTE score
       → score < threshold ? REFUSE : generate
@@ -18,6 +18,7 @@ from __future__ import annotations      # stdlib (special) — lazy annotations;
 
 import math                             # stdlib — sigmoid, to turn logits into 0..1
 from dataclasses import dataclass       # stdlib — Principal / Answer result types
+from datetime import date               # stdlib — as_of, the gate's time anchor
 from functools import lru_cache         # stdlib — the per-principal view cache
 
 from app.config import get_settings     # local — app/config.py (the default reranker's config)
@@ -60,21 +61,30 @@ class PreFilterRetriever:
         self._all = chunks
 
     @lru_cache(maxsize=32)
-    def _view_for(self, tenant_id: str, groups: frozenset[str]) -> HybridRetriever:
-        """Build (and cache) an index containing ONLY what this principal may see.
+    def _view_for(self, tenant_id: str, groups: frozenset[str], as_of: date) -> HybridRetriever:
+        """Build (and cache) an index containing ONLY what this principal may
+        see, AS THE TERMS STOOD ON as_of.
 
-        NOTE the cache key: (tenant_id, groups). Caching a per-principal view is
-        safe precisely BECAUSE the principal is part of the key. Compare the
-        semantic cache in the post-filter version below, whose key is the query
-        embedding alone — that's the leak.
+        NOTE the cache key: (tenant_id, groups, as_of) — every input the
+        predicate reads. Caching a view is safe precisely BECAUSE the full
+        predicate is the key. When the date joined the predicate it had to
+        join the key in the same commit: leave it out and a December query
+        gets served January's cached view — the post-filter cache leak all
+        over again, only across TIME instead of across tenants.
         """
-        visible = [c for c in self._all if c.meta and c.meta.visible_to(tenant_id, groups)]
+        visible = [c for c in self._all if c.meta and c.meta.visible_to(tenant_id, groups, as_of)]
         if not visible:
-            raise ValueError(f"no visible chunks for tenant {tenant_id!r}")
+            raise ValueError(f"no visible chunks for tenant {tenant_id!r} as of {as_of}")
         return HybridRetriever(visible)
 
-    def search(self, query: str, principal: Principal, k: int = 10) -> list[Hit]:
-        view = self._view_for(principal.tenant_id, principal.groups)
+    def search(
+        self, query: str, principal: Principal, k: int = 10, *, as_of: date | None = None
+    ) -> list[Hit]:
+        """as_of defaults to today — the right anchor for "what does my policy
+        say?". A claims handler passes the DATE OF LOSS instead: the wording
+        that governs a claim is the one in force when the accident happened,
+        not the one in force when the question got asked."""
+        view = self._view_for(principal.tenant_id, principal.groups, as_of or date.today())
         return view.rrf(query, k=k)
 
 
@@ -107,12 +117,14 @@ class PostFilterRetriever:
         self.cache[query] = hits
         return hits
 
-    def search(self, query: str, principal: Principal, k: int = 10) -> list[Hit]:
+    def search(
+        self, query: str, principal: Principal, k: int = 10, *, as_of: date | None = None
+    ) -> list[Hit]:
         hits = self.search_unfiltered(query, k=k)      # 1. retrieve globally
         return [                                       # 2. then filter
             h for h in hits
             if h.chunk.meta
-            and h.chunk.meta.visible_to(principal.tenant_id, principal.groups)
+            and h.chunk.meta.visible_to(principal.tenant_id, principal.groups, as_of or date.today())
         ]
 
 
@@ -178,12 +190,13 @@ def answer(
     principal: Principal,
     retriever: PreFilterRetriever,
     *,
+    as_of: date | None = None,
     threshold: float = REFUSAL_THRESHOLD,
     pool: int = 20,
     top_k: int = 5,
 ) -> Answer:
     """The full gated path. Returns an Answer; never calls a generator itself."""
-    hits = retriever.search(query, principal, k=pool)     # pre-filtered, always
+    hits = retriever.search(query, principal, k=pool, as_of=as_of)  # pre-filtered, always
     if not hits:
         return Answer(True, 0.0, [], [], "no candidates after gates")
 

@@ -181,6 +181,21 @@ def test_ask_is_tenant_scoped(fake_llm) -> None:
     assert "₹2,000" not in fake_llm.prompts[0]
 
 
+def test_as_of_time_travels_the_answer(fake_llm) -> None:
+    """Route-level date-of-loss: the SAME question, asked about December,
+    must be answered from December's wording — all the way into the prompt
+    the model reads."""
+    q = {"question": "what is my excess for an own damage claim?"}
+    with TestClient(app) as client:
+        client.post("/v1/ask", json=q, headers=auth())
+        client.post("/v1/ask", json={**q, "as_of": "2025-12-20"}, headers=auth())
+
+    assert fake_llm.stream_chat_calls == 2
+    today_prompt, december_prompt = fake_llm.prompts
+    assert "₹2,000" in today_prompt and "₹1,000" not in today_prompt
+    assert "₹1,000" in december_prompt and "₹2,000" not in december_prompt
+
+
 # =============================================================================
 # The prompt builder, unit-level: dedupe, budget, numbering.
 # =============================================================================

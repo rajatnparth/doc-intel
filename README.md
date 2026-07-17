@@ -4,7 +4,8 @@
 
 **A multi-tenant document intelligence API** — upload policy documents and
 claims records, ask questions, get cited answers. The demo corpus is motor
-insurance (an invented insurer, two policyholders, a superseded policy year);
+insurance (an invented insurer, two policyholders, an effective-dated prior
+policy year);
 the engine is domain-agnostic. Built to be *defended*, not demoed: every design
 decision here has a failure mode attached, and most of them have a test that
 fails when you remove the fix.
@@ -19,7 +20,7 @@ cp .env.example .env            # defaults to a stub provider — no Azure key n
 python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
                                 # the API has NO default secret and refuses to
                                 # boot without one — so you generate a real one
-pytest -q                       # 80 tests. First run downloads ~210MB of local
+pytest -q                       # 83 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network. (Tests mint their own ephemeral
                                 # secret — the suite depends on no fixed value.)
@@ -59,9 +60,12 @@ keeps their candidate sets disjoint. Then the villain: `PostFilterRetriever` ret
 the *correct* answer to Asha — and its query-keyed cache is holding Vikram's policy
 chunks, his ₹5,000 excess included, because the cache was populated before the
 filter ran. The cache developer did nothing wrong. **The vulnerability arrived the
-day post-filtering was chosen.** Closes with the *phrasing cliff*: the same
-liability question answered at 0.9987 or refused at 0.0006, depending on whether
-you use the document's own words.
+day post-filtering was chosen.** Then the *time gate*: the same excess question
+answered ₹2,000 as of today and ₹1,000 as of a December date of loss — same
+customer, two dates, two answers, both correct, because a claim is assessed
+under the wording in force when the accident happened. Closes with the
+*phrasing cliff*: the same liability question answered at 0.9987 or refused at
+0.0006, depending on whether you use the document's own words.
 
 **`calibrate.py`** — the module's real artifact, and it keeps proving the textbook
 wrong. The threshold sweep is **flat from 0.10 to 0.75**: 1 false answer + 2 false
@@ -115,8 +119,8 @@ app/
     hybrid.py        BM25 + dense, fused by RRF
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
-    corpus.py        2 policyholders, 1 superseded policy kit — the fixture
-tests/               executable proof of each claim — 80 tests
+    corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
+tests/               executable proof of each claim — 83 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -153,6 +157,8 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | `Usage` is a first-class type | *"What does one request cost you?"* is the follow-up question every time. Streaming sends no usage unless you ask. |
 | `_translate()` in `azure.py` | Where every `openai.*` exception dies. If one reaches a handler, the seam leaked. |
 | **Pre**-filter on `tenant_id`, never post-filter | `tenant_id` is a security boundary, not a relevance signal. Post-filtering returns the right answer *and* leaks — see `gated_demo.py`. A control that depends on the ordering of two function calls is not a control. |
+| Effective **windows**, not a status flag | "Active" asks the wrong question. Whether a wording applies is relative to a date — and not today's: a claim is assessed under the wording in force on the **date of loss**. A flag cannot represent that question; `effective_from/to` + `as_of` answer it, and "superseded" becomes a derived fact nobody has to remember to flip. |
+| `as_of` rides in the request body — and `tenant_id` may not | The contrast IS the rule: `tenant_id` *expands* what you may see, so it must arrive signed (JWT). `as_of` only *selects among versions you already own* — a time cursor inside your authorization scope. Which knobs need a signature is a per-knob decision. |
 | A refusal is a return value, not an exception | `Answer(refused=True, score=...)` — the caller can't forget to handle it, and the score is always reported. On a refusal the generator is **never called**: handed confident-looking irrelevant chunks, models answer anyway. |
 | The seam is a **test**, not a convention | A rule that lives in a README gets violated by the author within the month — measured: it did. `test_seam.py` parses every module's AST, so a lazy `import fastembed` inside a helper function fails CI the same as a top-level one. |
 | `AUTH_JWT_SECRET` has **no default** — boot fails without it | A service that *can* start in an unsafe state *will* be run in an unsafe state. A boot warning is a log line you grep for after the incident; a boot failure is a deploy that never went out wrong. The only default secret is no secret. |
@@ -174,6 +180,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | P0 | Domain conversion: motor insurance corpus | ✅ `sample_docs/` |
 | P1 | `/v1/ask` — retrieval meets generation | ✅ `rag.py`, `test_ask.py` |
 | P2 | Identity: JWT claims → Principal | ✅ `auth.py`, `test_auth.py` |
+| P3 | Effective-dated version gate (`as_of`) | ✅ date-of-loss retrieval |
 
 ---
 
@@ -319,8 +326,11 @@ zero, and the invariant the test asserts is the one that survives both corpora:
 fusion must never *lose* the answer.
 
 Both gates in `gated.py` are sabotage-verified against this corpus: delete the
-`tenant_id` check and three tests go red; delete the `status == "active"` check
-and two do.
+`tenant_id` check and three tests go red; delete the effective-window check and
+five do — including the cache-key test, because when the date joined the
+predicate it had to join the per-view cache key in the same commit (leave it
+out and a December query is served January's cached view: the post-filter
+cache leak again, across time instead of across tenants).
 
 Azure setup (resource vs deployment, TPM/RPM quota, the admission-time token
 reservation that causes 429s at 40% utilisation): [AZURE_SETUP.md](AZURE_SETUP.md).

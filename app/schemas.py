@@ -9,6 +9,7 @@ They look similar and they are NOT the same thing. Gate 1 protects us from
 clients. Gate 2 protects us from the model, whose output is untrusted input.
 """
 
+from datetime import date              # stdlib — AskRequest.as_of, the gate's time anchor
 from typing import Annotated, Literal   # stdlib — Annotated attaches metadata to a type;
                                         #   Literal restricts a value to a fixed set
 
@@ -54,6 +55,15 @@ class AskRequest(BaseModel):
     # the principal now arrives ONLY via the Authorization header (app/auth.py).
     # With extra="forbid", a client still sending tenant_id gets a 422, not a
     # silent ignore: the API actively rejects the old, unsafe shape.
+
+    # And note what IS in the body: as_of. The contrast with tenant_id is the
+    # lesson. tenant_id EXPANDS what you may see, so it must arrive signed.
+    # as_of only SELECTS among versions you already own — a time cursor inside
+    # your authorization scope, not an escalation. "Which knobs need a
+    # signature" is a per-knob decision, not a blanket rule.
+    # None = today ("what does my policy say?"). A claims handler sends the
+    # DATE OF LOSS: a December accident is governed by December's wording.
+    as_of: date | None = None
 
     # temperature=2.0 does not error at Azure. It just produces garbage, expensively.
     temperature: float = Field(0.0, ge=0.0, le=1.0)

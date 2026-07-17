@@ -1,4 +1,4 @@
-# Northwind Motor Insurance — Private Car Policy Kit (2025 — SUPERSEDED by the 2026 renewal)
+# Northwind Motor Insurance — Private Car Policy Kit (2025 policy year — in force 10 Jan 2025 to 10 Jan 2026)
 
 ## 2. Premium and Payment
 

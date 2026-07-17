@@ -6,6 +6,8 @@ Two policyholders on the same motor product, one superseded policy kit, and a
 reranker that decides whether we answer at all.
 """
 
+from datetime import date              # stdlib — the time-gate demo
+
 from app.retrieval.corpus import (      # local — app/retrieval/corpus.py
     ASHA_AGENT,
     ASHA_CUSTOMER,
@@ -59,11 +61,21 @@ def main() -> None:
     print("  sidebar, a trace exporter — is now a breach. The cache dev did")
     print("  nothing wrong. The vulnerability arrived with post-filtering.")
 
-    banner("THE FRESHNESS GATE — superseded is not retrievable")
-    hits = pre.search("how long do I have to pay my renewal premium?", Principal(*ASHA_CUSTOMER), k=10)
-    print(f"\n  docs reachable: {sorted({h.chunk.doc_title for h in hits})}")
-    print("  The 2025 kit says ₹1,000 excess / 30-day premium due. It is in the")
-    print("  store and unreachable. 'The LLM will notice the date' is not a control.")
+    banner("THE TIME GATE — 'active' is the wrong question")
+    q3 = "what is my excess for an own damage claim?"
+    for label, as_of in [("today", None), ("2025-12-20 (date of loss)", date(2025, 12, 20))]:
+        hits = pre.search(q3, Principal(*ASHA_CUSTOMER), k=10, as_of=as_of)
+        docs = sorted({h.chunk.doc_title for h in hits})
+        quoted = next(
+            (amt for amt in ("₹1,000", "₹2,000") if any(amt in h.chunk.text for h in hits)), "?"
+        )
+        print(f"\n  as of {label}")
+        print(f"    kit in force : {docs}")
+        print(f"    excess quoted: {quoted}")
+    print("\n  A December accident reported late is assessed under DECEMBER's")
+    print("  wording — same question, two dates, two answers, both CORRECT.")
+    print("  A status flag cannot represent that question. 'Superseded' is now")
+    print("  a DERIVED fact: the window closed; nobody had to remember a flag.")
 
     banner("THE REFUSAL PATH — and the phrasing cliff")
     for q2 in [

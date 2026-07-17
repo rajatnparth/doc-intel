@@ -4,6 +4,8 @@ The headline test is `test_post_filter_leaks_across_tenants_via_the_cache`:
 it does not ASSERT that post-filtering is dangerous, it DEMONSTRATES the leak.
 """
 
+from datetime import date              # stdlib — the time-travel scenarios
+
 import pytest                           # 3rd-party: pytest — fixtures, raises
 
 from app.retrieval.corpus import (      # local — app/retrieval/corpus.py
@@ -48,7 +50,9 @@ def test_pre_filter_never_makes_foreign_chunks_candidates(pre) -> None:
 
 
 def test_superseded_documents_are_not_retrievable(pre) -> None:
-    """'The LLM will notice the date' is not a control. Filter status=active."""
+    """'The LLM will notice the date' is not a control. The gate filters on the
+    effective window — 'superseded' is a DERIVED fact (the window closed), and
+    by default (as_of=today) an out-of-force kit is simply not a candidate."""
     asha = Principal(*ASHA_CUSTOMER)
     hits = pre.search("how long do I have to pay my renewal premium?", asha, k=20)
 
@@ -82,6 +86,44 @@ def test_acl_gates_within_a_tenant(pre) -> None:
     agent = Principal(*ASHA_AGENT)          # …but the call-centre view can see it
     hits = pre.search("what is the status of claim CLM-2026-0891?", agent, k=20)
     assert any("Claims File" in h.chunk.doc_title for h in hits)
+
+
+def test_the_gate_answers_as_of_the_date_of_loss(pre) -> None:
+    """The question a status flag cannot represent.
+
+    A December accident reported in July is assessed under DECEMBER's wording:
+    the 2025 kit's ₹1,000 excess, not today's ₹2,000. Same question, same
+    customer, two dates — two answers, both CORRECT. With status=="active" the
+    gate would serve today's kit and quote ₹2,000: confident, sourced, wrong.
+    """
+    asha = Principal(*ASHA_CUSTOMER)
+    q = "what is my excess for an own damage claim?"
+
+    today = pre.search(q, asha, k=20)
+    assert any("₹2,000" in h.chunk.text for h in today)
+    assert not any("₹1,000" in h.chunk.text for h in today)
+
+    at_loss = pre.search(q, asha, k=20, as_of=date(2025, 12, 20))
+    assert any("₹1,000" in h.chunk.text for h in at_loss)
+    assert not any("₹2,000" in h.chunk.text for h in at_loss)
+
+
+def test_the_view_cache_keys_on_the_date_too(pre) -> None:
+    """When the date joined the predicate it had to join the cache key in the
+    SAME commit. Leave it out and the second call below is served the first
+    call's cached view — the post-filter cache leak again, across TIME instead
+    of across tenants. Disjoint results are the proof the key is honest."""
+    asha = Principal(*ASHA_CUSTOMER)
+    q = "what is my excess for an own damage claim?"
+
+    now_view = {h.chunk.chunk_index for h in pre.search(q, asha, k=20)}
+    then_view = {h.chunk.chunk_index for h in pre.search(q, asha, k=20, as_of=date(2025, 12, 20))}
+
+    assert now_view and then_view
+    assert not (now_view & then_view), (
+        "a chunk served for both dates — the 2025 and 2026 kits' windows do "
+        "not overlap, so the cache must be returning a stale view"
+    )
 
 
 # =============================================================================

@@ -314,7 +314,9 @@ async def _ask_events(
     # 20 candidates are all CPU-bound. Run them inline and they block the event
     # loop — every OTHER live stream stalls while this one thinks. Async buys
     # occupancy only if the loop stays free (1.1); the threadpool keeps it free.
-    a = await run_in_threadpool(answer, req.question, principal, retriever)
+    a = await run_in_threadpool(
+        answer, req.question, principal, retriever, as_of=req.as_of
+    )
 
     if a.refused:
         # The generator is NEVER called on a refusal (gated.py explains why:
