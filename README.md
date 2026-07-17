@@ -2,8 +2,10 @@
 
 [![CI](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml/badge.svg)](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml)
 
-**A multi-tenant document intelligence API** — upload contracts and invoices, ask
-questions, get cited answers. Built to be *defended*, not demoed: every design
+**A multi-tenant document intelligence API** — upload policy documents and
+claims records, ask questions, get cited answers. The demo corpus is motor
+insurance (an invented insurer, two policyholders, a superseded policy year);
+the engine is domain-agnostic. Built to be *defended*, not demoed: every design
 decision here has a failure mode attached, and most of them have a test that
 fails when you remove the fix.
 
@@ -14,7 +16,7 @@ git clone https://github.com/rajatnparth/doc-intel && cd doc-intel
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # defaults to a stub provider — no Azure key needed
-pytest -q                       # 63 tests. First run downloads ~210MB of local
+pytest -q                       # 64 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network.
 ```
@@ -38,24 +40,28 @@ python chunk_demo.py               # why chunk size is not a number you pick
 uvicorn app.main:app --reload      # then: curl localhost:8000/health
 ```
 
-**`gated_demo.py`** — two tenants with near-identical contracts. Pre-filtering keeps
-their candidate sets disjoint. Then the villain: `PostFilterRetriever` returns the
-*correct* answer to Acme — and its query-keyed cache is holding four of Contoso's
-chunks, because the cache was populated before the filter ran. The cache developer
-did nothing wrong. **The vulnerability arrived the day post-filtering was chosen.**
+**`gated_demo.py`** — two policyholders on the same motor product. Pre-filtering
+keeps their candidate sets disjoint. Then the villain: `PostFilterRetriever` returns
+the *correct* answer to Asha — and its query-keyed cache is holding Vikram's policy
+chunks, his ₹5,000 excess included, because the cache was populated before the
+filter ran. The cache developer did nothing wrong. **The vulnerability arrived the
+day post-filtering was chosen.** Closes with the *phrasing cliff*: the same
+liability question answered at 0.9987 or refused at 0.0006, depending on whether
+you use the document's own words.
 
-**`calibrate.py`** — the module's real artifact, and the one that proved me wrong.
-The textbook says "the answerable and unanswerable distributions overlap, so pick a
-threshold from the tradeoff." Measured: **0 of 20 scores land in the 0.1–0.9 middle**.
-It's bimodal, the tradeoff table is flat, and the threshold is not the interesting knob.
-The actual defect is a false refusal *no threshold can fix* — see below.
+**`calibrate.py`** — the module's real artifact, and it keeps proving the textbook
+wrong. The threshold sweep is **flat from 0.10 to 0.75**: 1 false answer + 2 false
+refusals at every setting, because the errors sit on *opposite wrong sides* of any
+threshold. Moving the knob trades nothing; the reranker is the knob — see below.
 
-**`hybrid_demo.py`** — ask for invoice `INV-2024-0891`. Dense retrieval confidently
-returns `0888`, `0892`, `0893` at ranks 1–3; the right one lands at rank 5.
-Embeddings encode *meaning*, and an invoice number doesn't have any. BM25 nails it
-at rank 1. Then ask *"how long do we have to settle an invoice?"* and it inverts:
-dense finds it, BM25 can't. RRF fuses both by **rank** (never score — BM25 is
-unbounded and corpus-dependent). Real `bge-small-en-v1.5` embeddings, nothing staged.
+**`hybrid_demo.py`** — ask for claim `CLM-2026-0891` among near-identical siblings:
+dense "wins" by a margin of **0.012** — luck, not signal (BM25's margin is
+structural: no other chunk contains the token). Then ask *"how long do we have to
+settle the premium?"* and BM25 confidently puts **6. Personal Data** first —
+"settle" appears exactly once in the corpus, in *"settle a claim"*, and rare
+tokens score big. Dense reads the meaning; RRF fuses both by **rank** (never score
+— BM25 is unbounded and corpus-dependent). Real `bge-small-en-v1.5` embeddings,
+nothing staged.
 
 **`ann_bench.py`** — exact k-NN as ground truth, then HNSW sweeping `efSearch`
 (recall 0.585 → 0.999, latency rising with it) and IVF-Flat vs IVF-PQ. The gap
@@ -64,7 +70,7 @@ to recall 1.000 as you probe more clusters; IVF-PQ plateaus at 0.595 forever,
 because compression is a second loss `nprobe` can't undo — for 16× less RAM.
 
 **`chunk_demo.py`** — naive fixed-size chunking keeps a table row with its header
-at sizes 600 and 1000, and orphans it at 300/400/500/700/800. It isn't reliably
+at sizes 700 and 800, and orphans it at 300/400/500/600/1000. It isn't reliably
 bad, it's *arbitrary* — which is worse, because you can't reason about it.
 Structure-aware chunking is invariant at every size.
 
@@ -93,8 +99,8 @@ app/
     hybrid.py        BM25 + dense, fused by RRF
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
-    corpus.py        2 tenants, 1 superseded doc — the fixture
-tests/               executable proof of each claim — 63 tests
+    corpus.py        2 policyholders, 1 superseded policy kit — the fixture
+tests/               executable proof of each claim — 64 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -184,22 +190,37 @@ said no is not a metric.**
 
 ## The finding I didn't expect
 
-The refusal gate has a **false refusal that no threshold can fix**, and finding it
-is the most useful thing in this repo.
+The refusal gate has a **false refusal that no threshold can fix** — and since the
+motor-insurance conversion, a matching **false answer** on the other side. Finding
+the pair is the most useful thing in this repo.
 
-*"What is the cap on liability?"* is answerable — section 7 covers it. Retrieval
-surfaces the right chunk. The cross-encoder **ranks it #1**. Then scores it
-**0.009**, and the gate refuses.
+*"Is there an upper limit on what a claim pays out?"* is answerable — section 7
+covers it. Retrieval surfaces the right chunk. The cross-encoder **ranks it #1**.
+Then scores it **0.0006**, and the gate refuses.
 
-`ms-marco-MiniLM` was trained on MS MARCO — web search passages. Contract prose
-(*"Neither party's aggregate liability will exceed the fees paid in the twelve
-months preceding the claim"*) is out-of-distribution. So:
+Ask the same section the same thing *in its own words* — "what is the limit of
+liability?" — and the same chunk scores **0.9987**.
+
+> **The score doesn't measure whether the chunk answers the question. It measures
+> whether the question uses the document's vocabulary — and customers never use
+> the document's vocabulary.**
+
+The mirror image: *"what will next year's renewal premium be?"* scores **0.7785**.
+Section 2 is *about* the renewal premium, so topical proximity scores high — but
+the amount isn't in the corpus. A false answer, sitting on the *opposite wrong
+side* of every threshold from the false refusals: the sweep table is flat at
+1 + 2 from 0.10 to 0.75. Moving the knob trades nothing.
+
+`ms-marco-MiniLM` was trained on MS MARCO — web search passages. Policy wording
+(*"aggregate liability shall not exceed the Insured's Declared Value"*) is
+out-of-distribution — and so are **tables**: *"what should I do if the car is not
+driveable?"* scores 0.0010 even though "Vehicle not driveable" appears verbatim
+in the damage-codes table. So:
 
 > **A cross-encoder's ranking can be trustworthy while its calibration is not.**
 > The refusal gate depends on the calibration, not the ranking — so an
 > out-of-domain reranker breaks refusal *even when retrieval is perfect*.
 
-Lowering the threshold can't help: to admit a 0.009 you must admit everything.
 The fix is a domain-suitable reranker. `calibrate.py` decomposes every false
 refusal into **retrieval failure** vs **calibration failure**, because they have
 completely different fixes and "2 false refusals" tells you neither.
@@ -217,12 +238,24 @@ Built while working through Ripostiq's *Ship It: Python, FastAPI & Azure OpenAI
 RAG Agents*. The tests are the interesting part — several exist because a first
 draft **passed while the code it covered was deleted**, which is the most
 dangerous kind of green. See `test_streaming.py::test_disconnect_cancels_the_upstream_call`
-and `test_hybrid.py::test_rrf_costs_you_the_top_slot_but_keeps_the_answer_in_the_pool`.
+and `test_hybrid.py::test_rrf_keeps_the_answer_in_the_pool` — whose own story had
+to change during the domain conversion: the RRF demotion measured on the old
+corpus was partly fed by `bm25_search` returning **zero-score chunks in index
+order**, which fusion then paid real credit. The artifact is fixed (a chunk that
+matches no query term is not a result), the demotion on this corpus now measures
+zero, and the invariant the test asserts is the one that survives both corpora:
+fusion must never *lose* the answer.
 
-Both gates in `gated.py` are sabotage-verified: delete the `tenant_id` check and
-three tests go red; delete the `status == "active"` check and one does.
+Both gates in `gated.py` are sabotage-verified against this corpus: delete the
+`tenant_id` check and three tests go red; delete the `status == "active"` check
+and two do.
 
 Azure setup (resource vs deployment, TPM/RPM quota, the admission-time token
 reservation that causes 429s at 40% utilisation): [AZURE_SETUP.md](AZURE_SETUP.md).
+
+**Every document in `sample_docs/` is invented** — the insurer, both customers,
+every policy number, amount and claim. Structure modelled on publicly available
+motor policy wordings; content written for this repo. This is a demonstration
+system, not an insurance product and not insurance advice.
 
 MIT licensed.

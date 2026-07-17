@@ -2,14 +2,14 @@
 
     python gated_demo.py
 
-Two tenants with genuinely similar contracts, one superseded document, and a
+Two policyholders on the same motor product, one superseded policy kit, and a
 reranker that decides whether we answer at all.
 """
 
 from app.retrieval.corpus import (      # local — app/retrieval/corpus.py
-    ACME_FINANCE,
-    ACME_LEGAL,
-    CONTOSO_LEGAL,
+    ASHA_AGENT,
+    ASHA_CUSTOMER,
+    VIKRAM_CUSTOMER,
     load_corpus,
 )
 from app.retrieval.gated import (       # local — app/retrieval/gated.py
@@ -29,10 +29,10 @@ def banner(t: str) -> None:
 def main() -> None:
     chunks = load_corpus()
     pre = PreFilterRetriever(chunks)
-    q = "what are our payment terms?"
+    q = "what is my excess for an own damage claim?"
 
-    banner("THE GATE — same query, two tenants, disjoint answers")
-    for label, prin in [("acme", ACME_FINANCE), ("contoso", CONTOSO_LEGAL)]:
+    banner("THE GATE — same query, two policyholders, disjoint answers")
+    for label, prin in [("asha", ASHA_CUSTOMER), ("vikram", VIKRAM_CUSTOMER)]:
         hits = pre.search(q, Principal(*prin), k=5)
         tenants = {h.chunk.meta.tenant_id for h in hits}
         print(f"\n  {label:8} → tenants in candidate set: {tenants}")
@@ -42,46 +42,50 @@ def main() -> None:
 
     banner("💀 THE LEAK — post-filter + a cache someone added later")
     post = PostFilterRetriever(chunks)
-    acme_view = post.search(q, Principal(*ACME_FINANCE), k=20)
-    returned_tenants = {h.chunk.meta.tenant_id for h in acme_view}
-    print(f"\n  Acme's RETURNED result is correct: {returned_tenants}")
+    asha_view = post.search(q, Principal(*ASHA_CUSTOMER), k=20)
+    returned_tenants = {h.chunk.meta.tenant_id for h in asha_view}
+    print(f"\n  Asha's RETURNED result is correct: {returned_tenants}")
     print("  ...which is exactly why 'the user never sees it' is the wrong objection.\n")
     cached = post.cache[q]
     print("  But the CACHE (populated before the filter ran) holds:")
     for t in sorted({h.chunk.meta.tenant_id for h in cached}):
         n = sum(1 for h in cached if h.chunk.meta.tenant_id == t)
-        mark = "  ← FOREIGN" if t != "acme" else ""
+        mark = "  ← FOREIGN" if t != "asha" else ""
         print(f"    {t:10} {n} chunks{mark}")
-    foreign = [h.chunk for h in cached if h.chunk.meta.tenant_id == "contoso"]
-    print(f"\n  Contoso's actual contract text, sitting in a query-keyed cache:")
+    foreign = [h.chunk for h in cached if h.chunk.meta.tenant_id == "vikram"]
+    print(f"\n  Vikram's actual policy terms, sitting in a query-keyed cache:")
     print(f"    {foreign[0].text[:70].strip()}...")
     print("\n  Anything reading that cache — a reranker, a log, a 'related docs'")
     print("  sidebar, a trace exporter — is now a breach. The cache dev did")
     print("  nothing wrong. The vulnerability arrived with post-filtering.")
 
     banner("THE FRESHNESS GATE — superseded is not retrievable")
-    hits = pre.search("how long do we have to pay an invoice?", Principal(*ACME_LEGAL), k=10)
+    hits = pre.search("how long do I have to pay my renewal premium?", Principal(*ASHA_CUSTOMER), k=10)
     print(f"\n  docs reachable: {sorted({h.chunk.doc_title for h in hits})}")
-    print("  Acme MSA (2022) says 60 days / 0.5% interest. It is in the store and")
-    print("  unreachable. 'The LLM will notice the date' is not a control.")
+    print("  The 2025 kit says ₹1,000 excess / 30-day premium due. It is in the")
+    print("  store and unreachable. 'The LLM will notice the date' is not a control.")
 
-    banner("THE REFUSAL PATH")
+    banner("THE REFUSAL PATH — and the phrasing cliff")
     for q2 in [
-        "how long do we have to pay an invoice?",
-        "what is the parental leave policy?",
-        "what is the cap on liability?",
+        "how quickly must I report an accident?",
+        "is a courtesy car provided during repairs?",
+        "what is the limit of liability?",
+        "is there an upper limit on what a claim pays out?",
     ]:
-        a = answer(q2, Principal(*ACME_FINANCE), pre)
+        a = answer(q2, Principal(*ASHA_CUSTOMER), pre)
         verdict = "REFUSED" if a.refused else "answered"
         print(f"\n  {q2}")
         print(f"    {verdict:8}  score={a.score:.4f}")
         if a.refused:
             print(f"    near miss: {a.near_misses[0].heading[:46]}")
 
-    print("\n  ⚠️  The third one is a FALSE refusal. Section 7 answers it, retrieval")
-    print("     found it, and the reranker RANKED IT #1 — then scored it 0.009.")
-    print("     ms-marco-MiniLM was trained on web search passages; contract prose")
-    print("     is out-of-domain. Its RANKING is fine; its CALIBRATION is not.")
+    print("\n  ⚠️  The last two are THE SAME QUESTION, and section 7 answers both.")
+    print("     Phrased in the document's own words ('limit of liability') the")
+    print("     reranker scores ~0.999. Phrased the way a customer would say it,")
+    print("     the SAME chunk is still RANKED #1 — and scored near zero, so the")
+    print("     gate refuses. The score tracks lexical anchoring, not relevance:")
+    print("     ms-marco was trained on web passages, policy wording is out-of-")
+    print("     domain, and customers never use the document's vocabulary.")
     print("     No threshold fixes that. See: python -m app.retrieval.calibrate")
 
 

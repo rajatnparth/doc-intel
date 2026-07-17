@@ -3,7 +3,7 @@
     python hybrid_demo.py
 
 The embeddings are REAL (bge-small-en-v1.5). Nothing here is staged — if dense
-returns the wrong invoice, that's the model actually doing it.
+returns the wrong claim, that's the model actually doing it.
 """
 
 from pathlib import Path                # stdlib — read the sample docs
@@ -15,8 +15,8 @@ from app.retrieval.hybrid import HybridRetriever  # local — app/retrieval/hybr
 def load_corpus():
     chunks = []
     for name, title in [
-        ("acme_msa.md", "Acme MSA (2024)"),
-        ("invoices.md", "Invoice Register 2024"),
+        ("asha_policy_kit.md", "Asha Rao — Motor Policy Kit (2026)"),
+        ("asha_claims_file.md", "Claims File — Asha Rao"),
     ]:
         text = Path("sample_docs") / name
         chunks += chunk_document(text.read_text(), doc_title=title, max_chars=700)
@@ -29,7 +29,7 @@ def load_corpus():
 def show(label: str, hits, want: str, n: int = 3) -> None:
     print(f"  {label}")
     for h in hits[:n]:
-        # Check text_to_embed, NOT text — the invoice number lives in the heading,
+        # Check text_to_embed, NOT text — the claim number lives in the heading,
         # and text_to_embed is what both retrievers actually index. Checking
         # .text here was the same bug as indexing .text: it reported misses on
         # chunks that genuinely contained the answer.
@@ -60,18 +60,19 @@ def main() -> None:
     r = HybridRetriever(chunks)
     print(f"{len(chunks)} chunks indexed.\n")
 
-    # 1. EXACT TOKEN — an error code. Dense should struggle; BM25 should nail it.
-    probe(r, "error E-4471", "E-4471", "an exact token with no semantic meaning")
+    # 1. EXACT TOKEN — a damage code. Dense should struggle; BM25 should nail it.
+    probe(r, "damage code D-4471", "D-4471", "note BM25's #1: the claim entry that CITES the code")
 
-    # 2. EXACT TOKEN — an invoice number among near-identical siblings.
-    probe(r, "INV-2024-0891", "INV-2024-0891", "0888..0893 are all nearly identical")
+    # 2. EXACT TOKEN — a claim number among near-identical siblings.
+    probe(r, "CLM-2026-0891", "CLM-2026-0891", "0888..0893 near-identical — watch dense's margins")
 
     # 3. PARAPHRASE — no shared vocabulary with the source. BM25 should struggle.
-    probe(r, "what happens if we pay late?", "1.5%", "source says 'interest', not 'late'")
+    probe(r, "what happens if I pay my premium late?", "suspended",
+          "source says 'overdue', not 'late'")
 
-    # 4. PARAPHRASE — 'money-back period' never appears in the corpus.
-    probe(r, "how long do we have to settle an invoice?", "thirty (30) days",
-          "source says 'Payment is due within thirty (30) days'")
+    # 4. PARAPHRASE — 'settle' never appears in the policy wording.
+    probe(r, "how long do we have to settle the premium?", "fifteen (15) days",
+          "'settle' appears only in 6. Personal Data — 'settle a claim'")
 
     print("=" * 78)
     print("THE POINT")

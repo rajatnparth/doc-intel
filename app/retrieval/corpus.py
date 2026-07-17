@@ -1,8 +1,14 @@
-"""The demo corpus: two tenants, one superseded document.
+"""The demo corpus: two policyholders, one superseded policy kit.
 
-Shared by gated_demo.py, calibrate.py and the tests so they all reason about the
-same data. Real ingestion would read tenancy from the upload request; this is
-the fixture.
+Northwind Motor Insurance is invented; so are both customers. Shared by
+gated_demo.py, calibrate.py and the tests so they all reason about the same
+data. Real ingestion would read tenancy from the upload request; this is the
+fixture.
+
+The ACL split is the insurance-shaped one: `customer` is the policyholder's
+self-service view, `agent` is the call-centre view. The claims file carries
+internal handler notes, so it is agent-only — a customer asking about their
+own claim must get the answer from a human, never from the raw file.
 """
 
 from __future__ import annotations      # stdlib (special) — lazy annotations; first line
@@ -15,13 +21,13 @@ _DOCS = Path(__file__).resolve().parents[2] / "sample_docs"
 
 # (file, title, tenant, acl, status)
 _MANIFEST = [
-    ("acme_msa.md",                "Acme MSA (2024)",      "acme",    {"legal", "finance"}, "active"),
-    ("invoices.md",                "Invoice Register 2024", "acme",    {"finance"},          "active"),
-    # Same shape of contract, different tenant. This is what makes the leak REAL:
-    # "what are our payment terms?" genuinely matches both tenants' documents.
-    ("contoso_msa.md",             "Contoso MSA (2024)",   "contoso", {"legal", "finance"}, "active"),
-    # Superseded: still in the store, must never be retrievable.
-    ("acme_msa_v1_superseded.md",  "Acme MSA (2022)",      "acme",    {"legal", "finance"}, "superseded"),
+    ("asha_policy_kit.md",   "Asha Rao — Motor Policy Kit (2026)",     "asha",   {"customer", "agent"}, "active"),
+    ("asha_claims_file.md",  "Claims File — Asha Rao",                 "asha",   {"agent"},             "active"),
+    # Same product, different policyholder. This is what makes the leak REAL:
+    # "what is my excess?" genuinely matches both customers' policy kits.
+    ("vikram_policy_kit.md", "Vikram Mehta — Motor Policy Kit (2026)", "vikram", {"customer", "agent"}, "active"),
+    # Superseded: last year's kit, still in the store, must never be retrievable.
+    ("asha_policy_kit_v1_superseded.md", "Asha Rao — Motor Policy Kit (2025)", "asha", {"customer", "agent"}, "superseded"),
 ]
 
 
@@ -41,6 +47,6 @@ def load_corpus() -> list[Chunk]:
 
 
 # Principals used across demos and tests.
-ACME_FINANCE = ("acme", frozenset({"finance"}))
-ACME_LEGAL = ("acme", frozenset({"legal"}))
-CONTOSO_LEGAL = ("contoso", frozenset({"legal"}))
+ASHA_CUSTOMER = ("asha", frozenset({"customer"}))
+ASHA_AGENT = ("asha", frozenset({"agent"}))
+VIKRAM_CUSTOMER = ("vikram", frozenset({"customer"}))

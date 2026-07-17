@@ -2,8 +2,8 @@
 
     python chunk_demo.py
 
-Left: the naive 1000-char splitter guillotines the troubleshooting table, so the
-E-4471 row loses its header. Right: the structure-aware chunker keeps the table
+Left: the naive 1000-char splitter guillotines the damage-codes table, so the
+D-4471 row loses its header. Right: the structure-aware chunker keeps the table
 whole and prepends provenance to every prose chunk.
 
 This is section 3.1, made visible. Read the output, not just the code.
@@ -21,18 +21,18 @@ def banner(title: str) -> None:
 
 
 def header_survives(chunks) -> bool:
-    """True iff E-4471 appears in the SAME chunk as the table header."""
-    row = next((c for c in chunks if "E-4471" in c.text), None)
-    return row is not None and "Error Code" in row.text and "Remedy" in row.text
+    """True iff D-4471 appears in the SAME chunk as the table header."""
+    row = next((c for c in chunks if "D-4471" in c.text), None)
+    return row is not None and "Damage Code" in row.text and "Remedy" in row.text
 
 
 def main() -> None:
-    doc = Path("sample_docs/acme_msa.md").read_text()
-    title = "Acme MSA (2024)"
+    doc = Path("sample_docs/asha_policy_kit.md").read_text()
+    title = "Asha Rao — Motor Policy Kit (2026)"
 
     # ---- NAIVE: the failure is that the outcome is ARBITRARY -----------------
-    banner("STRATEGY 1 — naive fixed-size: does E-4471 keep its header?")
-    print("The naive splitter cuts at char N. Whether the E-4471 row stays with")
+    banner("STRATEGY 1 — naive fixed-size: does D-4471 keep its header?")
+    print("The naive splitter cuts at char N. Whether the D-4471 row stays with")
     print("its column header is pure luck — it depends on a size you picked for")
     print("unrelated reasons. Watch it flip:\n")
     for size in (300, 400, 500, 600, 700, 800, 1000):
@@ -56,12 +56,12 @@ def main() -> None:
     print(f"\n{len(smart)} chunks total. Boundaries fall on section headings.")
 
     # The payoff of technique 3: show text vs text_to_embed for a prose chunk.
-    prose = next(c for c in smart if not c.is_table and "30" in c.text)
+    prose = next(c for c in smart if not c.is_table and "fifteen (15)" in c.text)
     banner("TECHNIQUE 3 — what we actually embed (contextual retrieval)")
     print("Chunk's own text:")
     print("  " + repr(prose.text[:120]))
     print("\nText we EMBED (provenance prepended — this is what makes")
-    print("'what are Acme's payment terms?' match this chunk):")
+    print("'when is Asha's renewal premium due?' match this chunk):")
     print("  " + repr(prose.text_to_embed[:160]))
 
     # Technique 4: search small, return large.

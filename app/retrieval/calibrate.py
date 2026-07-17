@@ -7,39 +7,49 @@ questions the corpus ANSWERS, and plausible questions it DOESN'T — score both
 through the real pipeline, look at the two distributions, and choose from the
 tradeoff you can defend to a product owner.
 
-WHAT THIS ACTUALLY MEASURED (and why the textbook story was wrong)
+WHAT THIS ACTUALLY MEASURED (on the motor policy corpus)
 ------------------------------------------------------------------
 The received wisdom — and the first draft of this file — says: "the answerable
 and unanswerable distributions overlap in the middle, so pick a threshold from
-the business tradeoff." Run it. That is NOT what happens here.
+the business tradeoff." Run it. Three things happen instead, sharing one cause.
 
-1. The distribution is BIMODAL, not overlapping. ms-marco emits extreme logits
-   (+5.6 relevant / -11.3 irrelevant); sigmoid slams them to ~1.0 or ~0.0. The
-   middle band is EMPTY. Every threshold from 0.10 to 0.90 gives the identical
-   result — the tradeoff table is flat. The threshold is not the interesting knob.
+1. A FALSE REFUSAL no threshold can fix. "is there an upper limit on what a
+   claim pays out?" is answered by section 7. Retrieval surfaces it, the
+   cross-encoder RANKS IT #1 — then scores it 0.0006. Ask the SAME section the
+   same thing in its own words ("what is the limit of liability?") and the same
+   chunk scores 0.9987. Anchored 0.9987, paraphrased 0.0006: the score tracks
+   LEXICAL ANCHORING, not relevance — and customers never phrase questions in
+   the document's vocabulary.
 
-2. The real defect is a false refusal the threshold CANNOT fix. Two answerable
-   questions score ~0. Retrieval found the right chunk and the reranker RANKED IT
-   #1 — and then scored it 0.009. The ordering is right; the absolute number is
-   a lie.
+2. A FALSE ANSWER the threshold can't fix either. "what will next year's
+   renewal premium be?" scores 0.7785 — section 2 is ABOUT the renewal premium,
+   so topical proximity scores high. The amount is not in the corpus.
+   Topicality is not answerability.
 
-3. Why: ms-marco-MiniLM was trained on MS MARCO — web search passages. Contract
-   prose ("Neither party's aggregate liability will exceed the fees paid in the
-   twelve months preceding the claim") is out-of-distribution. The model is
-   confidently wrong about relevance it correctly ranked first.
+3. And the two errors sit on OPPOSITE WRONG SIDES of every threshold: from
+   0.10 to 0.75 the sweep table is flat at 1 false answer + 2 false refusals.
+   Moving the knob trades nothing. The threshold is not the interesting
+   control; the RERANKER is.
 
-So the finding is sharper than the textbook one: A CROSS-ENCODER'S RANKING CAN BE
-TRUSTWORTHY WHILE ITS CALIBRATION IS NOT. The refusal gate depends on the
-calibration, not the ranking — so an out-of-domain reranker breaks refusal even
-when retrieval is perfect. No threshold rescues that; you need a domain-suitable
-reranker, or a threshold fit on YOUR data, or a different signal entirely.
+Bonus defect: "what should I do if the car is not driveable?" scores 0.0010
+even though "Vehicle not driveable" appears VERBATIM in the corpus — inside a
+table. A cross-encoder trained on web prose does not read tables.
+
+Why: ms-marco-MiniLM was trained on MS MARCO — web search passages. Policy
+wording ("aggregate liability shall not exceed the Insured's Declared Value")
+is out-of-distribution. So the finding stands, sharper than the textbook one:
+A CROSS-ENCODER'S RANKING CAN BE TRUSTWORTHY WHILE ITS CALIBRATION IS NOT. The
+refusal gate depends on the calibration, not the ranking — so an out-of-domain
+reranker breaks refusal even when retrieval is perfect. No threshold rescues
+that; you need a domain-suitable reranker, or a threshold fit on YOUR data, or
+a different signal entirely.
 
 Which is the "MTEB is not your corpus" lesson, arriving where it actually hurts.
 """
 
 from __future__ import annotations      # stdlib (special) — lazy annotations; first line
 
-from app.retrieval.corpus import ACME_FINANCE, load_corpus  # local — app/retrieval/corpus.py
+from app.retrieval.corpus import ASHA_AGENT, load_corpus  # local — app/retrieval/corpus.py
 from app.retrieval.gated import (       # local — app/retrieval/gated.py
     PreFilterRetriever,
     Principal,
@@ -54,30 +64,30 @@ from app.retrieval.gated import (       # local — app/retrieval/gated.py
 # happens to answer. These are enough to show the method and the overlap.
 # -----------------------------------------------------------------------------
 ANSWERABLE = [
-    "how long do we have to pay an invoice?",
-    "what interest applies to late payments?",
-    "what is the uptime target for tier 2 services?",
-    "how quickly must a sev 1 incident get a response?",
-    "what does error E-4471 mean?",
-    "what is the total on invoice INV-2024-0891?",
-    "how much notice is required for non-renewal?",
-    "what is the cap on liability?",
-    "when are invoices deemed accepted?",
-    "what should I do if the checkpoint store is unreachable?",
+    "how long do I have to pay my renewal premium?",
+    "what happens if a premium instalment is overdue?",
+    "is windscreen glass replacement covered?",
+    "how quickly must I report an accident?",
+    "what does damage code D-4471 mean?",
+    "what is the status of claim CLM-2026-0891?",
+    "how much notice is required to cancel the policy?",
+    "is there an upper limit on what a claim pays out?",
+    "when is a claim deemed settled?",
+    "what should I do if the car is not driveable?",
 ]
 
 UNANSWERABLE = [
     # Plausible. Same domain, same vocabulary. Simply not in the corpus.
-    "what is the parental leave policy?",
-    "who is the account manager for this contract?",
-    "what is the data retention period?",
-    "which region is the data stored in?",
-    "what happens if there is a security breach?",
-    "can we sublicense the software to a subsidiary?",
-    "what is the process for a price increase?",
-    "who signed this agreement?",
-    "is there a discount for annual prepayment?",
-    "what are the GDPR obligations?",
+    "is a courtesy car provided during repairs?",
+    "who is my claims handler?",
+    "what is the no-claims bonus after five years?",
+    "am I covered when driving outside the country?",
+    "can I add a second driver to the policy?",
+    "is there a discount for installing a dashcam?",
+    "how do I transfer the policy when I sell the car?",
+    "does the policy cover engine damage from waterlogging?",
+    "what will next year's renewal premium be?",
+    "is my laptop covered if it is stolen from the car?",
 ]
 
 
@@ -98,16 +108,16 @@ def score_queries(queries: list[str], retriever, principal) -> list[tuple[str, f
 # that turns "the score was low" into "and here is WHY" — without it, a false
 # refusal is an undiagnosable aggregate.
 EXPECTED_HEADING = {
-    "how long do we have to pay an invoice?": "2. Payment Terms",
-    "what interest applies to late payments?": "2. Payment Terms",
-    "what is the uptime target for tier 2 services?": "3. Service Levels",
-    "how quickly must a sev 1 incident get a response?": "4. Support and Escalation",
-    "what does error E-4471 mean?": "5. Troubleshooting Reference",
-    "what is the total on invoice INV-2024-0891?": "INV-2024-0891",
-    "how much notice is required for non-renewal?": "1. Parties and Term",
-    "what is the cap on liability?": "7. Limitation of Liability",
-    "when are invoices deemed accepted?": "2. Payment Terms",
-    "what should I do if the checkpoint store is unreachable?": "5. Troubleshooting Reference",
+    "how long do I have to pay my renewal premium?": "2. Premium and Payment",
+    "what happens if a premium instalment is overdue?": "2. Premium and Payment",
+    "is windscreen glass replacement covered?": "3. Cover and Benefits",
+    "how quickly must I report an accident?": "4. Claims Process",
+    "what does damage code D-4471 mean?": "5. Damage Assessment Codes",
+    "what is the status of claim CLM-2026-0891?": "CLM-2026-0891",
+    "how much notice is required to cancel the policy?": "1. Policy and Period of Insurance",
+    "is there an upper limit on what a claim pays out?": "7. Limit of Liability",
+    "when is a claim deemed settled?": "4. Claims Process",
+    "what should I do if the car is not driveable?": "5. Damage Assessment Codes",
 }
 
 
@@ -165,8 +175,8 @@ def diagnose_refusals(queries, retriever, principal, threshold: float) -> None:
     print(f"  calibration failures: {calibration_failed}")
     if calibration_failed and not retrieval_failed:
         print("\n  Every false refusal is the RERANKER, not retrieval. Lowering the")
-        print("  threshold cannot help: to admit a 0.009 you must admit ~everything.")
-        print("  The fix is a reranker that understands contract prose — ms-marco was")
+        print("  threshold cannot help: to admit a 0.0006 you must admit ~everything.")
+        print("  The fix is a reranker that understands policy wording — ms-marco was")
         print("  trained on web search passages, and this corpus is out-of-domain.")
 
 
@@ -205,7 +215,9 @@ def sweep(answerable: list[float], unanswerable: list[float]) -> None:
 def main() -> None:
     print("Loading corpus, embedding, scoring 20 queries through the real pipeline...\n")
     retriever = PreFilterRetriever(load_corpus())
-    principal = Principal(*ACME_FINANCE)
+    # The agent view: sees the policy kit AND the claims file, like ACME_FINANCE
+    # used to see the contract and the invoice register.
+    principal = Principal(*ASHA_AGENT)
 
     ans = score_queries(ANSWERABLE, retriever, principal)
     una = score_queries(UNANSWERABLE, retriever, principal)

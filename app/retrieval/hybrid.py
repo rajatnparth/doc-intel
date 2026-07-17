@@ -104,8 +104,14 @@ class HybridRetriever:
         return [Hit(self.chunks[i], r, float(sims[i])) for r, i in enumerate(order)]
 
     def bm25_search(self, query: str, k: int = 10) -> list[Hit]:
+        """A zero score means the chunk matched NO query term. Returning it
+        anyway would hand back the corpus in index order dressed up as a
+        ranking — and rrf() below would then pay that noise real fusion credit
+        (1/(60+rank) per chunk) on every query whose vocabulary misses the
+        corpus. Found by measurement: a paraphrase query "ranked" the right
+        chunk #1 with score 0.0000, purely because it was chunk 0."""
         scores = self._bm25.get_scores(tokenize(query))
-        order = np.argsort(-scores)[:k]
+        order = [i for i in np.argsort(-scores) if scores[i] > 0.0][:k]
         return [Hit(self.chunks[i], r, float(scores[i])) for r, i in enumerate(order)]
 
     # -- fusion ----------------------------------------------------------------
