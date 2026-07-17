@@ -20,6 +20,7 @@ from fastapi.concurrency import run_in_threadpool  # 3rd-party: fastapi (submodu
 from fastapi.responses import JSONResponse, StreamingResponse  # 3rd-party: fastapi
                                         #   (submodule) — JSON errors + the SSE stream
 
+from app.auth import DEV_SECRET, PrincipalDep           # local — app/auth.py (verified identity)
 from app.config import Settings, get_settings          # local — app/config.py
 from app.llm.base import LLMClient, LLMError, Usage     # local — app/llm/base.py (the seam)
 from app.llm.factory import build_llm_client            # local — app/llm/factory.py
@@ -57,6 +58,12 @@ log = logging.getLogger("doc_intel")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.validate_for_provider()  # fail at boot, not at 3am on the first request
+
+    if settings.auth_jwt_secret == DEV_SECRET:
+        # A warning, not a crash: the keyless quickstart is a feature. But the
+        # operator who deploys this without setting AUTH_JWT_SECRET reads this
+        # line in their logs on every single boot.
+        log.warning("AUTH_JWT_SECRET is the dev default — every token is forgeable")
 
     # ONE client for the whole process, not one per request.
     # It owns a connection pool; rebuilding it per request would mean a fresh TLS
@@ -284,14 +291,15 @@ async def _ask_events(
     llm: LLMClient,
     retriever: PreFilterRetriever,
     settings: Settings,
+    principal: Principal,
     req: AskRequest,
     request: Request,
     request_id: str,
 ) -> AsyncIterator[str]:
-    # ⚠️ TEMPORARY (phase 2): the principal comes from the request body, which
-    # means the client CHOOSES its tenant. Unshippable by design; the field is
-    # marked in schemas.py and this line is where the JWT claim will land.
-    principal = Principal(req.tenant_id, frozenset(req.groups))
+    # The principal arrived VERIFIED — built in app/auth.py from signed claims,
+    # the only request-path place a Principal is constructed. The body-field
+    # version of this line is gone, and schemas.py rejects clients still
+    # sending it.
 
     # Embedding the query, building a first-use index view, and cross-encoding
     # 20 candidates are all CPU-bound. Run them inline and they block the event
@@ -349,6 +357,7 @@ async def _ask_events(
 async def ask(
     req: AskRequest,
     request: Request,
+    principal: PrincipalDep,
     llm: LLMDep,
     retriever: RetrieverDep,
     settings: SettingsDep,
@@ -356,11 +365,13 @@ async def ask(
     """Retrieve -> gate -> refuse or cite + generate, streamed.
 
     Still no retry loop, no semaphore, no `openai` import, no prompt template —
-    and now also no retrieval logic and no threshold. Each of those lives where
-    a second consumer can reach it."""
+    and now also no retrieval logic, no threshold, and no token parsing. Each
+    lives where a second consumer can reach it. Note the 401 happens BEFORE
+    this body runs: an unauthenticated request never touches the retriever,
+    the models, or the corpus."""
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     return StreamingResponse(
-        _ask_events(llm, retriever, settings, req, request, request_id),
+        _ask_events(llm, retriever, settings, principal, req, request, request_id),
         media_type="text/event-stream",
         headers={**SSE_HEADERS, "x-request-id": request_id},
     )

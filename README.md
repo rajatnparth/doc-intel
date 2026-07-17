@@ -16,7 +16,7 @@ git clone https://github.com/rajatnparth/doc-intel && cd doc-intel
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # defaults to a stub provider — no Azure key needed
-pytest -q                       # 71 tests. First run downloads ~210MB of local
+pytest -q                       # 78 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network.
 ```
@@ -40,10 +40,13 @@ python chunk_demo.py               # why chunk size is not a number you pick
 uvicorn app.main:app --reload      # then: curl localhost:8000/health
 ```
 
-And the loop itself, end to end (stub provider — no key needed):
+And the loop itself, end to end (stub provider — no Azure key needed; the
+bearer token is minted locally with the dev secret):
 
 ```bash
-curl -N localhost:8000/v1/ask -X POST -H 'content-type: application/json' \
+TOKEN=$(python -m app.auth --tenant asha --groups customer)
+curl -N localhost:8000/v1/ask -X POST \
+  -H 'content-type: application/json' -H "Authorization: Bearer $TOKEN" \
   -d '{"question": "how quickly must I report an accident?"}'
 ```
 
@@ -90,6 +93,7 @@ app/
   config.py          Settings from env, validated at BOOT — not at 3am
   schemas.py         The two contracts (Gate 1: clients. Gate 2: the model.)
   sse.py             The streaming protocol: discriminated frames + [DONE]
+  auth.py            JWT -> Principal. The only request-path place one is built.
   rag.py             The context budget: parents deduped, chars capped, [n] cited
   main.py            FastAPI app, DI, error envelope, routes (incl. /v1/ask)
   llm/
@@ -108,7 +112,7 @@ app/
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 superseded policy kit — the fixture
-tests/               executable proof of each claim — 71 tests
+tests/               executable proof of each claim — 78 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -164,6 +168,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | 3.4 | Metadata gates + the refusal path | ✅ `gated.py`, `calibrate.py` |
 | P0 | Domain conversion: motor insurance corpus | ✅ `sample_docs/` |
 | P1 | `/v1/ask` — retrieval meets generation | ✅ `rag.py`, `test_ask.py` |
+| P2 | Identity: JWT claims → Principal | ✅ `auth.py`, `test_auth.py` |
 
 ---
 
@@ -199,10 +204,16 @@ score, the reason, and near-misses as links. Four decisions worth defending:
   chunks from one section must not spend the budget twice), capped in chars,
   question last. Nothing in `rag.py` imports FastAPI, openai, or a tokenizer.
 
-⚠️ Known scaffolding, marked in the code: the principal currently arrives in the
-request body, which means the client *chooses* its tenant. Unshippable by
-design — phase 2 replaces it with a verified JWT claim. Identity is a property
-of the transport, not the payload.
+**Identity is a property of the transport, not the payload.** The principal is
+built in exactly one request-path place — `auth.py`, from *verified* JWT claims
+(signature, mandatory `exp`, audience — each check blocks a named attack, each
+attack has a test). Phase 1's `tenant_id` body field didn't just stop working;
+with `extra="forbid"` it now 422s, so no client keeps believing it controls its
+tenant. Sabotage note: flipping `verify_signature: False` silently disabled
+three defenses at once (PyJWT couples them) — and three tests went red, which
+is why forged, expired, and cross-audience tokens each have their own. Dev
+tokens use HS256 and a boot-warned default secret; the enterprise swap
+(IdP-signed RS256 + JWKS) lands entirely inside `get_principal`.
 
 ---
 

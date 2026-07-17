@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # makes answers worse AND more expensive at the same time.
     ask_context_chars: int = Field(6_000, ge=500)
 
+    # HS256 signing secret for /v1/ask bearer tokens. The default is designed
+    # to be SEEN: its value says what it is, and lifespan logs a warning when a
+    # process boots with it. Production replaces this whole scheme with the
+    # IdP's RS256/JWKS keys — see app/auth.py.
+    auth_jwt_secret: str = Field("dev-secret-do-not-deploy", min_length=8)
+
     def validate_for_provider(self) -> None:
         """Fail fast if we're told to use Azure but weren't given credentials.
 

@@ -21,6 +21,12 @@ pytest>=8.3
 pytest-asyncio>=0.24
 anyio>=4.6
 
+# --- Auth (Phase 2) ------------------------------------------------------------
+# PyJWT : sign/verify bearer tokens. Chosen over python-jose: maintained, minimal,
+#         does exactly this one job. HS256 in dev; the RS256/JWKS enterprise swap
+#         happens inside app/auth.py without changing the dependency.
+PyJWT>=2.10
+
 # --- Retrieval / ANN (Module 3) ----------------------------------------------
 # numpy     : array math for vectors + exact ground-truth search.
 # hnswlib   : a small, focused HNSW implementation (the efSearch demo).

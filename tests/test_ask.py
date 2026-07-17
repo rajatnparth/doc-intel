@@ -11,6 +11,8 @@ import pytest                           # 3rd-party: pytest — fixtures, raises
 
 from fastapi.testclient import TestClient  # 3rd-party: fastapi (submodule) — drives the app
 
+from app.auth import mint               # local — app/auth.py (dev token minter)
+from app.config import get_settings      # local — app/config.py
 from app.ingest import chunk_document   # local — app/ingest/chunker.py
 from app.llm.base import TokenChunk, Usage  # local — app/llm/base.py (wire types)
 from app.main import app, get_llm       # local — app/main.py (app + the DI seam)
@@ -21,6 +23,12 @@ from app.rag import build_prompt, select_sources  # local — app/rag.py
 # SSE plumbing for assertions: "data: {json}" blocks -> parsed events,
 # with the [DONE] sentinel kept as a plain string.
 # -----------------------------------------------------------------------------
+def auth(tenant: str = "asha", groups: tuple[str, ...] = ("customer",)) -> dict:
+    """A valid dev token. Identity now travels here — never in the body."""
+    token = mint(tenant, list(groups), secret=get_settings().auth_jwt_secret)
+    return {"Authorization": f"Bearer {token}"}
+
+
 def events_of(body: str) -> list:
     out = []
     for block in body.split("\n\n"):
@@ -75,7 +83,11 @@ def fake_llm():
 # =============================================================================
 def test_ask_streams_sources_then_tokens_then_done(fake_llm) -> None:
     with TestClient(app) as client:
-        r = client.post("/v1/ask", json={"question": "how quickly must I report an accident?"})
+        r = client.post(
+            "/v1/ask",
+            json={"question": "how quickly must I report an accident?"},
+            headers=auth(),
+        )
 
     assert r.status_code == 200
     ev = events_of(r.text)
@@ -102,7 +114,7 @@ def test_ask_streams_sources_then_tokens_then_done(fake_llm) -> None:
 def test_ask_prompt_contains_extracts_and_question_last(fake_llm) -> None:
     q = "how quickly must I report an accident?"
     with TestClient(app) as client:
-        client.post("/v1/ask", json={"question": q})
+        client.post("/v1/ask", json={"question": q}, headers=auth())
 
     assert fake_llm.stream_chat_calls == 1
     prompt = fake_llm.prompts[0]
@@ -123,7 +135,9 @@ def test_refusal_never_calls_the_generator(fake_llm) -> None:
     never saw the question". Only the call counter can prove a non-event."""
     with TestClient(app) as client:
         r = client.post(
-            "/v1/ask", json={"question": "is a courtesy car provided during repairs?"}
+            "/v1/ask",
+            json={"question": "is a courtesy car provided during repairs?"},
+            headers=auth(),
         )
 
     ev = events_of(r.text)
@@ -154,10 +168,8 @@ def test_ask_is_tenant_scoped(fake_llm) -> None:
     with TestClient(app) as client:
         r = client.post(
             "/v1/ask",
-            json={
-                "question": "what is my excess for an own damage claim?",
-                "tenant_id": "vikram",
-            },
+            json={"question": "what is my excess for an own damage claim?"},
+            headers=auth(tenant="vikram"),
         )
 
     ev = events_of(r.text)
