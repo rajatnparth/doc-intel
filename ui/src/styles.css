@@ -198,6 +198,8 @@ main { flex: 1; padding: 16px 0; }
 
 .usage { color: var(--muted); font-size: 12px; margin-top: 6px; }
 
+.token-error { margin-top: 10px; font-size: 13.5px; }
+
 footer {
   display: flex;
   gap: 10px;

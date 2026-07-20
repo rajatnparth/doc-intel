@@ -7,6 +7,26 @@
 
 import type { AskRequest, Frame, HandoffResponse } from "./types";
 
+/** HTTP headers may only carry ISO-8859-1, and a JWT is narrower still —
+ * base64url segments joined by dots, pure printable ASCII. Anything outside
+ * that means the paste grabbed something other than the token: a chat UI's
+ * masking bullets (••••), smart quotes, a zero-width space. Without this
+ * check, fetch() throws `TypeError: … non ISO-8859-1 code point` — true,
+ * useless, and rendered as a scary "network" error. Validate BEFORE the
+ * header is built and say what actually happened. */
+export function tokenProblem(token: string): string | null {
+  if (!token) return null;
+  if (/[^\x21-\x7e]/.test(token)) {
+    return (
+      "The pasted token contains characters a JWT can't contain — this " +
+      "usually means the paste grabbed masking dots or formatting instead " +
+      "of the raw token. Mint one in your terminal and copy it from there: " +
+      "python -m app.auth --tenant asha --groups customer"
+    );
+  }
+  return null;
+}
+
 /** A non-stream failure (401 bad token, 422 bad body, 429 shed load): the
  * engine's JSON error envelope, surfaced before any SSE began. */
 export class ApiError extends Error {

@@ -11,7 +11,7 @@
  */
 
 import { useRef, useState } from "react";
-import { askStream, createHandoff, ApiError } from "./api";
+import { askStream, createHandoff, tokenProblem, ApiError } from "./api";
 import { FactsCard, RefusalCard, SourcesPanel, StreamedAnswer } from "./components";
 import type { FactsEvent, HandoffResponse, RefusalEvent, SourceRef, Usage } from "./types";
 
@@ -35,6 +35,7 @@ let nextId = 1;
 
 export default function App() {
   const [token, setToken] = useState("");
+  const [tokenError, setTokenError] = useState<string | null>(null);
   const [question, setQuestion] = useState("");
   const [asOf, setAsOf] = useState("");
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
@@ -47,6 +48,14 @@ export default function App() {
   async function ask() {
     const q = question.trim();
     if (!q || !token.trim() || busy) return;
+
+    // Fail the bad paste HERE, at the field it belongs to — before fetch()
+    // turns it into a cryptic TypeError dressed up as a network failure.
+    const problem = tokenProblem(token.trim());
+    if (problem) {
+      setTokenError(problem);
+      return;
+    }
 
     const id = nextId++;
     setExchanges((xs) => [
@@ -118,6 +127,11 @@ export default function App() {
   }
 
   async function handoff(id: number, requestId: string) {
+    const problem = tokenProblem(token.trim());
+    if (problem) {
+      setTokenError(problem);
+      return;
+    }
     patch(id, (e) => ({ ...e, handoffBusy: true }));
     try {
       const ticket = await createHandoff(requestId, "", token.trim());
@@ -147,7 +161,10 @@ export default function App() {
           type="password"
           placeholder="Paste a JWT — mint one: python -m app.auth --tenant asha --groups customer"
           value={token}
-          onChange={(e) => setToken(e.target.value)}
+          onChange={(e) => {
+            setToken(e.target.value);
+            setTokenError(null); // a fresh paste deserves a fresh verdict
+          }}
           aria-label="Bearer token"
         />
         <label className="asof">
@@ -160,6 +177,7 @@ export default function App() {
           />
         </label>
       </section>
+      {tokenError && <div className="error token-error">{tokenError}</div>}
 
       <main>
         {exchanges.length === 0 && (
