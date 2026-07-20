@@ -37,6 +37,13 @@ jobs:
       - name: Run the suite
         run: pytest -q
 
+      # The gate in test_evals.py already FAILS on regression; this step
+      # makes the scorecard VISIBLE on green runs too — per-case verdicts
+      # and the three totals, in every CI log, not only when things break.
+      # (Models are warm from the suite; this re-run costs a few seconds.)
+      - name: Eval scorecard
+        run: python -m evals.run
+
   # The reference client compiles under strict TypeScript or the build is red.
   # That is the UI's test: the frame types in ui/src/types.ts mirror app/sse.py,
   # and the exhaustive switch over them means a contract drift fails HERE.
