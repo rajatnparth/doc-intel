@@ -9,9 +9,11 @@ read like a paragraph of business logic.
 """
 
 import logging                          # stdlib — structured logs
+import time                             # stdlib — audit duration (monotonic, not wall)
 import uuid                             # stdlib — request_id generation
 from contextlib import asynccontextmanager  # stdlib — turns a generator into the
                                         #   lifespan context manager (yield splits it)
+from dataclasses import dataclass, field  # stdlib — StreamCapture is plain mutable state
 from typing import Annotated, AsyncIterator  # stdlib — DI annotation + the stream's type
 
 from fastapi import Depends, FastAPI, Request  # 3rd-party: fastapi — app, DI, raw request
@@ -20,8 +22,17 @@ from fastapi.concurrency import run_in_threadpool  # 3rd-party: fastapi (submodu
 from fastapi.responses import JSONResponse, StreamingResponse  # 3rd-party: fastapi
                                         #   (submodule) — JSON errors + the SSE stream
 
+from app.audit import (                 # local — app/audit.py (the exchange record)
+    AuditRecord,
+    AuditSink,
+    FactRef,
+    JsonlAuditSink,
+    RetrievedRef,
+    now_utc,
+)
 from app.auth import PrincipalDep                       # local — app/auth.py (verified identity)
 from app.config import Settings, get_settings          # local — app/config.py
+from app.handoff import StubTicketStore, TicketStore    # local — app/handoff.py (refusal -> ticket)
 from app.llm.base import LLMClient, LLMError, Usage     # local — app/llm/base.py (the seam)
 from app.llm.factory import build_llm_client            # local — app/llm/factory.py
 from app.policy_admin import PolicyAdmin, StubPolicyAdmin  # local — app/policy_admin.py
@@ -33,9 +44,20 @@ from app.router import FIELD_LABELS, FactField, route   # local — app/router.p
                                         #   (numbers-vs-wording: tier 1 deterministic,
                                         #   tier 2 LLM-classified, both behind Gate 2)
 from app.retrieval.corpus import load_corpus            # local — app/retrieval/corpus.py (fixture)
-from app.retrieval.gated import Principal, PreFilterRetriever, answer  # local —
-                                        #   app/retrieval/gated.py (gates + refusal)
-from app.schemas import AskRequest, ChatStreamRequest, ErrorBody, ErrorEnvelope  # local — app/schemas.py
+from app.retrieval.gated import (       # local — app/retrieval/gated.py (gates + refusal)
+    REFUSAL_THRESHOLD,
+    Principal,
+    PreFilterRetriever,
+    answer,
+)
+from app.schemas import (               # local — app/schemas.py
+    AskRequest,
+    ChatStreamRequest,
+    ErrorBody,
+    ErrorEnvelope,
+    HandoffRequest,
+    HandoffResponse,
+)
 from app.sse import (                   # local — app/sse.py (the wire protocol)
     DoneEvent,
     ErrorEvent,
@@ -100,6 +122,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # deployment swaps in a connector to the insurer's core system; the
     # PolicyAdmin Protocol is the plug, and this line is the socket.
     app.state.policy_admin = StubPolicyAdmin()
+
+    # Phase 6: the audit trail and the handoff queue. Same socket pattern —
+    # JSONL file and in-memory stub here; WORM store and the insurer's
+    # ticketing connector on the private side of the split.
+    app.state.audit = JsonlAuditSink(settings.audit_path)
+    app.state.tickets = StubTicketStore()
     try:
         yield
     finally:
@@ -137,6 +165,14 @@ def get_policy_admin(request: Request) -> PolicyAdmin:
     return request.app.state.policy_admin
 
 
+def get_audit(request: Request) -> AuditSink:
+    return request.app.state.audit
+
+
+def get_tickets(request: Request) -> TicketStore:
+    return request.app.state.tickets
+
+
 # `Annotated[X, Depends(f)]` is the modern spelling of `x: X = Depends(f)`.
 # It's preferred because the dependency lives in the TYPE, so the parameter can
 # still have a real default, and the annotation is reusable.
@@ -144,6 +180,8 @@ LLMDep = Annotated[LLMClient, Depends(get_llm)]
 RetrieverDep = Annotated[PreFilterRetriever, Depends(get_retriever)]
 PolicyAdminDep = Annotated[PolicyAdmin, Depends(get_policy_admin)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+AuditDep = Annotated[AuditSink, Depends(get_audit)]
+TicketsDep = Annotated[TicketStore, Depends(get_tickets)]
 
 
 # =============================================================================
@@ -211,6 +249,24 @@ SSE_HEADERS = {
 }
 
 
+@dataclass
+class StreamCapture:
+    """What actually crossed the wire — collected FOR THE AUDIT RECORD while
+    the stream runs. The stream itself never buffers (contract rule 1); this
+    is a second, passive accumulation whose consumer is the dispute handler,
+    not the client. `answer_text` is unknowable until the stream ends, which
+    is why the audit write lives in a `finally` and not at request time."""
+
+    parts: list[str] = field(default_factory=list)
+    usage: Usage | None = None
+    error_code: str = ""
+    disconnected: bool = False
+
+    @property
+    def text(self) -> str:
+        return "".join(self.parts)
+
+
 async def _llm_frames(
     llm: LLMClient,
     *,
@@ -219,6 +275,7 @@ async def _llm_frames(
     max_tokens: int,
     request: Request,
     request_id: str,
+    capture: StreamCapture | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE frames as tokens arrive. Shared by /v1/chat/stream and /v1/ask
     — the disconnect-cancel machinery must not be duplicated, because the copy
@@ -246,6 +303,8 @@ async def _llm_frames(
             # The cancellation happens in `finally`, via upstream.aclose().
             if await request.is_disconnected():
                 log.info("client disconnected, cancelling upstream", extra={"request_id": request_id})
+                if capture is not None:
+                    capture.disconnected = True
                 break
 
             if chunk.usage is not None:
@@ -253,9 +312,13 @@ async def _llm_frames(
                 # client asked for stream_options={"include_usage": True}.
                 # Without it you cannot answer "what does one request cost?"
                 usage = chunk.usage
+                if capture is not None:
+                    capture.usage = chunk.usage
                 continue
 
             if chunk.text:
+                if capture is not None:
+                    capture.parts.append(chunk.text)
                 yield frame(TokenEvent(text=chunk.text))
 
     except LLMError as exc:
@@ -263,6 +326,8 @@ async def _llm_frames(
         # the model wrote a word. We cannot send a 500 now. So the error becomes
         # a MESSAGE in our protocol, tagged with a `type` the client can switch on.
         log.warning("stream failed mid-flight: %s", exc.code, extra={"request_id": request_id})
+        if capture is not None:
+            capture.error_code = exc.code
         yield frame(
             ErrorEvent(
                 code=exc.code,
@@ -330,6 +395,13 @@ async def chat_stream(
 # -----------------------------------------------------------------------------
 # Phase 1 — /v1/ask: the RAG loop. Gates -> rerank -> refuse OR cite + generate.
 # -----------------------------------------------------------------------------
+def _refs(chunks) -> list[RetrievedRef]:
+    return [
+        RetrievedRef(doc_title=c.doc_title, heading=c.heading, chunk_index=c.chunk_index)
+        for c in chunks
+    ]
+
+
 async def _ask_events(
     llm: LLMClient,
     retriever: PreFilterRetriever,
@@ -339,12 +411,67 @@ async def _ask_events(
     req: AskRequest,
     request: Request,
     request_id: str,
+    audit: AuditSink,
 ) -> AsyncIterator[str]:
     # The principal arrived VERIFIED — built in app/auth.py from signed claims,
     # the only request-path place a Principal is constructed. The body-field
     # version of this line is gone, and schemas.py rejects clients still
     # sending it.
 
+    # Phase 6: everything below feeds this dict; the AuditRecord is
+    # constructed and WRITTEN in the finally block, because its most
+    # important field — what the customer actually saw — does not exist
+    # until the stream ends. `outcome` starts pessimistic ("error") and is
+    # upgraded by whichever path completes.
+    started = time.monotonic()
+    rec: dict = {
+        "request_id": request_id,
+        "at": now_utc(),
+        "tenant_id": principal.tenant_id,
+        "groups": sorted(principal.groups),
+        "question": req.question,
+        "as_of": req.as_of,
+        "outcome": "error",
+    }
+    capture = StreamCapture()
+    try:
+        async for f in _ask_events_inner(
+            llm, retriever, policy_admin, settings, principal, req, request,
+            request_id, rec, capture,
+        ):
+            yield f
+    finally:
+        rec["duration_ms"] = int((time.monotonic() - started) * 1000)
+        # Merged HERE, not in the happy path: if the generator was torn down
+        # mid-stream, the post-stream update never ran, but the capture still
+        # holds exactly what was delivered before the teardown.
+        if capture.parts:
+            rec["answer_text"] = capture.text
+        if capture.usage is not None:
+            rec["prompt_tokens"] = capture.usage.prompt_tokens
+            rec["completion_tokens"] = capture.usage.completion_tokens
+        try:
+            audit.write(AuditRecord(**rec))
+        except Exception:  # noqa: BLE001 — the record must never kill the stream…
+            # …but a swallowed audit failure is a compliance hole, so it is
+            # the loudest thing this module logs. The strict variant — refuse
+            # to ANSWER when the sink is down — belongs with ops (phase 9),
+            # because it needs sink health-checking to not be a self-DoS.
+            log.exception("AUDIT WRITE FAILED — exchange not recorded", extra={"request_id": request_id})
+
+
+async def _ask_events_inner(
+    llm: LLMClient,
+    retriever: PreFilterRetriever,
+    policy_admin: PolicyAdmin,
+    settings: Settings,
+    principal: Principal,
+    req: AskRequest,
+    request: Request,
+    request_id: str,
+    rec: dict,
+    capture: StreamCapture,
+) -> AsyncIterator[str]:
     # ROUTE FIRST: is this a question about a VALUE the system of record holds?
     # Facts never come from prose — calibrate.py measured why (a premium
     # question scored 0.7785 against a section that merely DISCUSSES premiums).
@@ -363,6 +490,7 @@ async def _ask_events(
         if record is None:
             # No record, and falling through to RAG would answer a numbers
             # question from prose — the exact thing this router forbids.
+            rec.update(outcome="refusal", refusal_reason="no policy record on file")
             yield frame(RefusalEvent(score=0.0, reason="no policy record on file", near_misses=[]))
         else:
             facts = [FactItem(name=FIELD_LABELS[field], value=str(getattr(record, field.value)))]
@@ -372,6 +500,10 @@ async def _ask_events(
                 # does not exist yet, in any subsystem.
                 facts.append(FactItem(name=FIELD_LABELS[FactField.RENEWAL_DATE], value=str(record.renewal_date)))
             log.info("ask routed to policy_admin: %s", field.value, extra={"request_id": request_id})
+            rec.update(
+                outcome="facts",
+                facts=[FactRef(name=f.name, value=f.value) for f in facts],
+            )
             yield frame(FactsEvent(policy_number=record.policy_number, facts=facts))
         yield frame(DoneEvent(usage=None))   # no usage: NO MODEL WAS CALLED
         yield done_frame()
@@ -391,6 +523,13 @@ async def _ask_events(
         # tests/test_ask.py proves it with a counting fake.
         log.info(
             "ask refused: score=%.4f", a.score, extra={"request_id": request_id}
+        )
+        rec.update(
+            outcome="refusal",
+            rerank_score=a.score,
+            threshold=REFUSAL_THRESHOLD,
+            refusal_reason=a.reason,
+            retrieved=_refs(a.near_misses),
         )
         yield frame(
             RefusalEvent(
@@ -419,6 +558,20 @@ async def _ask_events(
         )
     )
 
+    # Pessimistic until the stream completes: if the client (or the ASGI
+    # server) tears this generator down mid-answer, the finally in
+    # _ask_events records "disconnected" with whatever text had been sent.
+    rec.update(
+        outcome="disconnected",
+        rerank_score=a.score,
+        threshold=REFUSAL_THRESHOLD,
+        retrieved=_refs(a.chunks),
+        sources=[
+            RetrievedRef(doc_title=s.doc_title, heading=s.heading)
+            for s in sources
+        ],
+    )
+
     prompt = build_prompt(req.question, sources)
     async for f in _llm_frames(
         llm,
@@ -427,8 +580,21 @@ async def _ask_events(
         max_tokens=req.max_tokens,
         request=request,
         request_id=request_id,
+        capture=capture,
     ):
         yield f
+
+    # The stream ran to completion — resolve the outcome from what the
+    # capture saw. answer_text/usage are filled either way: a mid-stream
+    # error still delivered a prefix, and the record must say which prefix.
+    rec.update(
+        outcome=(
+            "error" if capture.error_code
+            else "disconnected" if capture.disconnected
+            else "answer"
+        ),
+        error_code=capture.error_code,
+    )
 
 
 @app.post("/v1/ask")
@@ -440,6 +606,7 @@ async def ask(
     retriever: RetrieverDep,
     policy_admin: PolicyAdminDep,
     settings: SettingsDep,
+    audit: AuditDep,
 ) -> StreamingResponse:
     """Route -> facts from the system of record, OR retrieve -> gate ->
     refuse or cite + generate. Streamed either way.
@@ -451,9 +618,67 @@ async def ask(
     touches the retriever, the record store, the models, or the corpus."""
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     return StreamingResponse(
-        _ask_events(llm, retriever, policy_admin, settings, principal, req, request, request_id),
+        _ask_events(llm, retriever, policy_admin, settings, principal, req, request, request_id, audit),
         media_type="text/event-stream",
         headers={**SSE_HEADERS, "x-request-id": request_id},
+    )
+
+
+# -----------------------------------------------------------------------------
+# Phase 6 — /v1/handoff: a refusal must not be a dead end.
+# -----------------------------------------------------------------------------
+@app.post("/v1/handoff", response_model=HandoffResponse, status_code=201)
+async def handoff(
+    req: HandoffRequest,
+    request: Request,
+    principal: PrincipalDep,
+    audit: AuditDep,
+    tickets: TicketsDep,
+):
+    """Turn an audited exchange into a ticket for a human.
+
+    The ticket REFERENCES the exchange (request_id) rather than copying the
+    conversation: the agent who picks it up reads the audit record — what the
+    customer saw AND what the system retrieved and scored. One source of truth.
+
+    THE CHECK THAT MATTERS: the record must belong to the caller's verified
+    tenant. Request ids leak — headers, logs, support screenshots — and
+    without this line any authenticated tenant could pull another tenant's
+    exchange into a ticket. And it answers 404, not 403: a 403 on a foreign
+    id would CONFIRM the id exists, which is itself a leak.
+    """
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+
+    # The JSONL lookup is file I/O — off the event loop, like every other
+    # blocking call in this file.
+    rec = await run_in_threadpool(audit.get, req.request_id)
+    if rec is None or rec.tenant_id != principal.tenant_id:
+        return JSONResponse(
+            status_code=404,
+            headers={"x-request-id": request_id},
+            content=ErrorEnvelope(
+                error=ErrorBody(
+                    code="not_found",
+                    message="no such exchange",
+                    request_id=request_id,
+                    retryable=False,
+                )
+            ).model_dump(),
+        )
+
+    t = tickets.create(
+        request_id=rec.request_id,
+        tenant_id=principal.tenant_id,
+        question=rec.question,
+        reason=rec.refusal_reason or f"customer requested a human after outcome={rec.outcome}",
+        note=req.note,
+    )
+    log.info("handoff created: %s -> %s", rec.request_id, t.ticket_id, extra={"request_id": request_id})
+    return HandoffResponse(
+        ticket_id=t.ticket_id,
+        request_id=t.request_id,
+        status=t.status,
+        created_at=t.created_at,
     )
 
 

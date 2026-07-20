@@ -80,6 +80,14 @@ export type Frame =
   | ErrorEvent
   | DoneEvent;
 
+/** POST /v1/handoff response — the ticket the refusal card renders. */
+export interface HandoffResponse {
+  ticket_id: string;
+  request_id: string;
+  status: "open";
+  created_at: string;
+}
+
 /** The request body for POST /v1/ask (app/schemas.py: AskRequest).
  * Note what is ABSENT: tenant_id / groups. Identity travels ONLY in the
  * Authorization header; the server 422s a body that still includes it. */

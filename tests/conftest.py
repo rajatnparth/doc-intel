@@ -26,3 +26,14 @@ os.environ.setdefault("AUTH_JWT_SECRET", secrets.token_hex(32))
 # (tests/test_store.py); everything app-level runs on memory. Same precedence
 # trick as the secret: setdefault beats .env, an exported var beats both.
 os.environ.setdefault("VECTOR_STORE", "memory")
+
+# Audit records land in a per-run temp file, not in the developer's
+# var/audit.jsonl — the suite must neither read nor grow local state. Tests
+# that assert on records fetch them BY REQUEST ID (the x-request-id response
+# header), so sharing one file across the run is safe by construction.
+import tempfile                         # stdlib — per-run isolation for the audit sink
+
+os.environ.setdefault(
+    "AUDIT_PATH",
+    os.path.join(tempfile.mkdtemp(prefix="doc-intel-test-audit-"), "audit.jsonl"),
+)

@@ -9,7 +9,7 @@ They look similar and they are NOT the same thing. Gate 1 protects us from
 clients. Gate 2 protects us from the model, whose output is untrusted input.
 """
 
-from datetime import date              # stdlib — AskRequest.as_of, the gate's time anchor
+from datetime import date, datetime    # stdlib — AskRequest.as_of + handoff created_at
 from typing import Annotated, Literal   # stdlib — Annotated attaches metadata to a type;
                                         #   Literal restricts a value to a fixed set
 
@@ -153,6 +153,31 @@ class ExtractRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(..., min_length=1, max_length=32_000)
+
+
+class HandoffRequest(BaseModel):
+    """Gate 1 for /v1/handoff (phase 6).
+
+    request_id references the caller's OWN audited exchange — the route
+    verifies that ownership against the verified principal, and answers 404
+    (never 403) on a miss: a 403 on someone else's id confirms it exists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(..., min_length=8, max_length=64)
+    # The customer's own words, size-capped like every free-text field: this
+    # travels into a ticketing system whose limits we don't control.
+    note: str = Field("", max_length=2_000)
+
+
+class HandoffResponse(BaseModel):
+    """What the client renders on the refusal card: the ticket reference."""
+
+    ticket_id: str
+    request_id: str
+    status: Literal["open"]
+    created_at: datetime
 
 
 class ChatStreamRequest(BaseModel):

@@ -5,7 +5,7 @@
  * you can see the protocol instead of trusting a wrapper.
  */
 
-import type { AskRequest, Frame } from "./types";
+import type { AskRequest, Frame, HandoffResponse } from "./types";
 
 /** A non-stream failure (401 bad token, 422 bad body, 429 shed load): the
  * engine's JSON error envelope, surfaced before any SSE began. */
@@ -24,6 +24,7 @@ export async function* askStream(
   req: AskRequest,
   token: string,
   signal: AbortSignal,
+  onRequestId?: (id: string) => void,
 ): AsyncGenerator<Frame> {
   const res = await fetch("/v1/ask", {
     method: "POST",
@@ -34,6 +35,12 @@ export async function* askStream(
     body: JSON.stringify(req),
     signal,
   });
+
+  // The exchange's identity, minted by the server before the first frame.
+  // It is the key into the AUDIT TRAIL — /v1/handoff references it, which is
+  // how a "talk to a human" ticket carries full context without copying any.
+  const rid = res.headers.get("x-request-id");
+  if (rid && onRequestId) onRequestId(rid);
 
   if (!res.ok) {
     // Before the stream starts, errors are ordinary HTTP + JSON envelope.
@@ -79,4 +86,28 @@ export async function* askStream(
     // stops the provider's meter). The Stop button is wired to real money.
     reader.cancel().catch(() => {});
   }
+}
+
+/** POST /v1/handoff — turn a refused (or any audited) exchange into a ticket.
+ * Sends the request_id, not the conversation: the server-side agent reads
+ * the audit record, the single source of truth. */
+export async function createHandoff(
+  requestId: string,
+  note: string,
+  token: string,
+): Promise<HandoffResponse> {
+  const res = await fetch("/v1/handoff", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ request_id: requestId, note }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const e = body?.error ?? {};
+    throw new ApiError(res.status, e.code ?? String(res.status), e.message ?? `HTTP ${res.status}`, false);
+  }
+  return (await res.json()) as HandoffResponse;
 }
