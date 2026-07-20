@@ -36,3 +36,26 @@ jobs:
 
       - name: Run the suite
         run: pytest -q
+
+  # The reference client compiles under strict TypeScript or the build is red.
+  # That is the UI's test: the frame types in ui/src/types.ts mirror app/sse.py,
+  # and the exhaustive switch over them means a contract drift fails HERE.
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and build
+        run: npm run build

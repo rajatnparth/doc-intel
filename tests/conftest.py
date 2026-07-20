@@ -18,3 +18,11 @@ import os                               # stdlib — the environment IS the conf
 import secrets                          # stdlib — cryptographically strong randomness
 
 os.environ.setdefault("AUTH_JWT_SECRET", secrets.token_hex(32))
+
+# The suite must be hermetic with respect to STORAGE too: a developer whose
+# .env says VECTOR_STORE=qdrant must not have tests silently reading (or
+# racing a running server for the folder lock on) their local database.
+# Tests that exercise the qdrant store do so EXPLICITLY, in tmp_path
+# (tests/test_store.py); everything app-level runs on memory. Same precedence
+# trick as the secret: setdefault beats .env, an exported var beats both.
+os.environ.setdefault("VECTOR_STORE", "memory")

@@ -143,6 +143,8 @@ app/
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
 tests/               executable proof of each claim — 110 tests
+ui/                  reference client (React SPA): renders the SSE contract —
+                     facts vs cited answers vs refusals. See ui/README.md.
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it

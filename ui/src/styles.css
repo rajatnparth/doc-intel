@@ -1,0 +1,208 @@
+/* Plain by intent: the reference client demonstrates the contract, not a
+   design system. Light/dark via prefers-color-scheme; no framework. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1f2933;
+  --muted: #5b6570;
+  --line: #d9dee4;
+  --card: #f6f7f9;
+  --accent: #1d5233;
+  --accent-bg: #e9f3ec;
+  --warn: #8f2c18;
+  --warn-bg: #fdf1ee;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14181d;
+    --fg: #e6e9ec;
+    --muted: #9aa4ae;
+    --line: #313a43;
+    --card: #1c2229;
+    --accent: #7fc79a;
+    --accent-bg: #1d2b23;
+    --warn: #e8917d;
+    --warn-bg: #2e1e19;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.55 system-ui, -apple-system, sans-serif;
+}
+
+.shell {
+  max-width: 760px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0 16px;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 18px 0 10px;
+}
+header h1 { font-size: 20px; margin: 0; }
+.sub { color: var(--muted); font-size: 12.5px; }
+
+.auth {
+  display: flex;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.auth input[type="password"] {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+  font-size: 13px;
+}
+.asof {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.asof input {
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+}
+
+main { flex: 1; padding: 16px 0; }
+.empty { color: var(--muted); }
+
+.exchange { margin-bottom: 26px; }
+.q {
+  font-weight: 600;
+  margin-bottom: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pill {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 9px;
+}
+
+.answer { white-space: pre-wrap; }
+.cursor { animation: blink 1s step-start infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.cite {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.9em;
+  padding: 0 2px;
+}
+
+.facts {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.facts-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.badge {
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 2px 8px;
+}
+.badge.subtle { background: var(--muted); }
+.policy { color: var(--muted); font-size: 12.5px; }
+.facts dl { margin: 0; }
+.facts dl div { display: flex; justify-content: space-between; padding: 3px 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-weight: 600; }
+
+.refusal {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.refusal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.refusal p { margin: 6px 0; }
+.score { color: var(--muted); font-size: 12.5px; }
+.nm-label { color: var(--muted); font-size: 13px; }
+.near-misses { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+
+.sources { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.source { color: var(--muted); font-size: 13px; padding: 1px 0; }
+
+.error {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.usage { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+footer {
+  display: flex;
+  gap: 10px;
+  padding: 12px 0 18px;
+  border-top: 1px solid var(--line);
+}
+footer textarea {
+  flex: 1;
+  resize: none;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+}
+footer button {
+  align-self: flex-end;
+  padding: 10px 22px;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+  cursor: pointer;
+}
+footer button:disabled { opacity: 0.45; cursor: default; }
+footer button.stop { background: var(--warn); }
