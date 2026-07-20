@@ -3,7 +3,7 @@
  * VISIBLE — that is the entire job of a reference client.
  */
 
-import type { FactsEvent, RefusalEvent, SourceRef } from "./types";
+import type { FactsEvent, HandoffResponse, RefusalEvent, SourceRef } from "./types";
 
 /** Facts: provenance badge front and centre. The number came from the system
  * of record, not from prose — and no tokens streamed because no model ran. */
@@ -27,8 +27,21 @@ export function FactsCard({ facts }: { facts: FactsEvent }) {
 }
 
 /** A refusal is an outcome, not an error: neutral styling, the score that
- * drove it, and the near-misses offered as leads — never as an answer. */
-export function RefusalCard({ refusal }: { refusal: RefusalEvent }) {
+ * drove it, the near-misses offered as leads — and phase 6's addition, the
+ * way OUT: a handoff button, because a refusal must not be a dead end. The
+ * ticket carries only the request_id; the human agent reads the audit
+ * record and sees what the customer saw plus what the system scored. */
+export function RefusalCard({
+  refusal,
+  ticket,
+  onHandoff,
+  handoffBusy,
+}: {
+  refusal: RefusalEvent;
+  ticket: HandoffResponse | null;
+  onHandoff: (() => void) | null;
+  handoffBusy: boolean;
+}) {
   return (
     <div className="refusal">
       <div className="refusal-head">
@@ -47,6 +60,18 @@ export function RefusalCard({ refusal }: { refusal: RefusalEvent }) {
             ))}
           </ul>
         </>
+      )}
+      {ticket ? (
+        <div className="ticket">
+          <span className="badge">{ticket.ticket_id}</span> A human will pick this
+          up with the full context of this exchange.
+        </div>
+      ) : (
+        onHandoff && (
+          <button className="handoff" onClick={onHandoff} disabled={handoffBusy}>
+            {handoffBusy ? "Creating ticket…" : "Talk to a human"}
+          </button>
+        )
       )}
     </div>
   );

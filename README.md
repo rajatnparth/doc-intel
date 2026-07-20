@@ -20,7 +20,7 @@ cp .env.example .env            # defaults to a stub provider — no Azure key n
 python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
                                 # the API has NO default secret and refuses to
                                 # boot without one — so you generate a real one
-pytest -q                       # 110 tests. First run downloads ~210MB of local
+pytest -q                       # 117 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network. (Tests mint their own ephemeral
                                 # secret — the suite depends on no fixed value.)
@@ -119,6 +119,8 @@ app/
   router.py          Numbers vs wording: tier 1 deterministic, tier 2 an LLM verdict behind Gate 2.
   policy_admin.py    The system of record (Protocol + stub). Numbers live HERE.
   rag.py             The context budget: parents deduped, chars capped, [n] cited
+  audit.py           One record per exchange: what was asked, retrieved, scored, DELIVERED
+  handoff.py         Refusal -> ticket. References the audit record; copies nothing.
   main.py            FastAPI app, DI, error envelope, routes (incl. /v1/ask)
   llm/
     base.py          LLMClient + EmbeddingClient + RerankClient Protocols. The seam.
@@ -142,7 +144,7 @@ app/
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
-tests/               executable proof of each claim — 110 tests
+tests/               executable proof of each claim — 117 tests
 ui/                  reference client (React SPA): renders the SSE contract —
                      facts vs cited answers vs refusals. See ui/README.md.
 ```
@@ -189,6 +191,8 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | A refusal is a return value, not an exception | `Answer(refused=True, score=...)` — the caller can't forget to handle it, and the score is always reported. On a refusal the generator is **never called**: handed confident-looking irrelevant chunks, models answer anyway. |
 | The seam is a **test**, not a convention | A rule that lives in a README gets violated by the author within the month — measured: it did. `test_seam.py` parses every module's AST, so a lazy `import fastembed` inside a helper function fails CI the same as a top-level one. |
 | The gate is an **argument**, not a cache key | `store.search(vector, gate, k)` — tenant, ACL and as-of travel WITH the query and filter inside the ANN traversal. The old per-principal view cache was correct only while its key listed every predicate input (the `as_of` time-leak had to be test-pinned). A parameter can't be forgotten; a cache key can. Both stores pass the same parametrised gate tests — delete one clause from the Qdrant filter and two go red. |
+| The audit record is written when the stream **ends** | Its most important field is what the customer actually SAW — unknowable until the last token. A disconnect after 40 tokens produces a record saying exactly that. Audit is not logging: different reader (a dispute handler, months later), different artifact. |
+| A handoff ticket **references** the exchange, never copies it | `POST /v1/handoff {request_id}` — the agent reads the audit record: what the customer saw plus what the system retrieved and scored. The lookup is tenant-gated and 404s identically for foreign and nonexistent ids (a 403 would confirm existence). Sabotage-verified: drop the tenant check and the cross-tenant test goes red. |
 | `AUTH_JWT_SECRET` has **no default** — boot fails without it | A service that *can* start in an unsafe state *will* be run in an unsafe state. A boot warning is a log line you grep for after the incident; a boot failure is a deploy that never went out wrong. The only default secret is no secret. |
 
 ---
@@ -211,6 +215,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | P3 | Effective-dated version gate (`as_of`) | ✅ date-of-loss retrieval |
 | P4 | Numbers-vs-wording router + system of record | ✅ `router.py`, `policy_admin.py` |
 | P5 | Vector persistence — the gate travels with the query | ✅ `store/`, `test_store.py` |
+| P6 | Audit trail + human handoff | ✅ `audit.py`, `handoff.py`, `POST /v1/handoff` |
 
 ---
 

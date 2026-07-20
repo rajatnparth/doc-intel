@@ -161,6 +161,26 @@ main { flex: 1; padding: 16px 0; }
 .nm-label { color: var(--muted); font-size: 13px; }
 .near-misses { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
 
+.handoff {
+  margin-top: 10px;
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+.handoff:disabled { opacity: 0.5; cursor: default; }
+.ticket {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
 .sources { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
 .source { color: var(--muted); font-size: 13px; padding: 1px 0; }
 

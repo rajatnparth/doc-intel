@@ -11,14 +11,15 @@
  */
 
 import { useRef, useState } from "react";
-import { askStream, ApiError } from "./api";
+import { askStream, createHandoff, ApiError } from "./api";
 import { FactsCard, RefusalCard, SourcesPanel, StreamedAnswer } from "./components";
-import type { FactsEvent, RefusalEvent, SourceRef, Usage } from "./types";
+import type { FactsEvent, HandoffResponse, RefusalEvent, SourceRef, Usage } from "./types";
 
 interface Exchange {
   id: number;
   question: string;
   asOf: string;
+  requestId: string;                  // the key into the audit trail
   text: string;
   sources: SourceRef[];
   facts: FactsEvent | null;
@@ -26,6 +27,8 @@ interface Exchange {
   error: { code: string; message: string; retryable: boolean } | null;
   usage: Usage | null;
   done: boolean;
+  ticket: HandoffResponse | null;
+  handoffBusy: boolean;
 }
 
 let nextId = 1;
@@ -48,7 +51,10 @@ export default function App() {
     const id = nextId++;
     setExchanges((xs) => [
       ...xs,
-      { id, question: q, asOf, text: "", sources: [], facts: null, refusal: null, error: null, usage: null, done: false },
+      {
+        id, question: q, asOf, requestId: "", text: "", sources: [], facts: null,
+        refusal: null, error: null, usage: null, done: false, ticket: null, handoffBusy: false,
+      },
     ]);
     setQuestion("");
     setBusy(true);
@@ -58,7 +64,8 @@ export default function App() {
 
     try {
       const req = { question: q, ...(asOf ? { as_of: asOf } : {}) };
-      for await (const frame of askStream(req, token.trim(), ac.signal)) {
+      const onRequestId = (rid: string) => patch(id, (e) => ({ ...e, requestId: rid }));
+      for await (const frame of askStream(req, token.trim(), ac.signal, onRequestId)) {
         switch (frame.type) {
           case "token":
             patch(id, (e) => ({ ...e, text: e.text + frame.text }));
@@ -110,6 +117,24 @@ export default function App() {
     abortRef.current?.abort();
   }
 
+  async function handoff(id: number, requestId: string) {
+    patch(id, (e) => ({ ...e, handoffBusy: true }));
+    try {
+      const ticket = await createHandoff(requestId, "", token.trim());
+      patch(id, (e) => ({ ...e, ticket, handoffBusy: false }));
+    } catch (err) {
+      patch(id, (e) => ({
+        ...e,
+        handoffBusy: false,
+        error: {
+          code: err instanceof ApiError ? err.code : "network",
+          message: err instanceof ApiError ? err.message : String(err),
+          retryable: true,
+        },
+      }));
+    }
+  }
+
   return (
     <div className="shell">
       <header>
@@ -152,7 +177,14 @@ export default function App() {
             </div>
 
             {e.facts && <FactsCard facts={e.facts} />}
-            {e.refusal && <RefusalCard refusal={e.refusal} />}
+            {e.refusal && (
+              <RefusalCard
+                refusal={e.refusal}
+                ticket={e.ticket}
+                onHandoff={e.requestId ? () => void handoff(e.id, e.requestId) : null}
+                handoffBusy={e.handoffBusy}
+              />
+            )}
             {(e.text || (!e.facts && !e.refusal && !e.error && !e.done)) && (
               <StreamedAnswer text={e.text} streaming={!e.done} />
             )}

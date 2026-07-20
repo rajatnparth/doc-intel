@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # The app then boots read-only and FAILS CLOSED if the store is empty —
     # serving an empty index would look exactly like "every question refused".
     vector_store: Literal["memory", "qdrant"] = "memory"
+
+    # ---- Audit trail (phase 6) -----------------------------------------------
+    # Where exchange records are appended (one JSON object per line). The
+    # JSONL file is the open-core sink; a WORM store / append-only table
+    # implements the same AuditSink Protocol on the private side.
+    audit_path: str = "var/audit.jsonl"
     # A local FOLDER by default (embedded mode: no server, single process).
     # Setting qdrant_url flips the SAME client to a server — that one line is
     # the local-laptop -> docker -> managed-cloud path, config not code.
