@@ -30,7 +30,7 @@ def banner(t: str) -> None:
 
 def main() -> None:
     chunks = load_corpus()
-    pre = PreFilterRetriever(chunks)
+    pre = PreFilterRetriever.from_chunks(chunks)
     q = "what is my excess for an own damage claim?"
 
     banner("THE GATE — same query, two policyholders, disjoint answers")

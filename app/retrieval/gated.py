@@ -19,13 +19,19 @@ from __future__ import annotations      # stdlib (special) — lazy annotations;
 import math                             # stdlib — sigmoid, to turn logits into 0..1
 from dataclasses import dataclass       # stdlib — Principal / Answer result types
 from datetime import date               # stdlib — as_of, the gate's time anchor
-from functools import lru_cache         # stdlib — the per-principal view cache
 
-from app.config import get_settings     # local — app/config.py (the default reranker's config)
+from app.config import get_settings     # local — app/config.py (default embedder/reranker config)
 from app.ingest import Chunk            # local — app/ingest/chunker.py
-from app.llm.base import RerankClient   # local — app/llm/base.py (the seam)
-from app.llm.factory import build_reranker  # local — app/llm/factory.py
-from app.retrieval.hybrid import Hit, HybridRetriever  # local — app/retrieval/hybrid.py
+from app.llm.base import EmbeddingClient, RerankClient  # local — app/llm/base.py (the seam)
+from app.llm.factory import build_embedding_client, build_reranker  # local — app/llm/factory.py
+from app.retrieval.hybrid import (      # local — app/retrieval/hybrid.py
+    Hit,
+    HybridRetriever,
+    _unit_vectors,
+    bm25_rank,
+    fuse_rrf,
+)
+from app.store.base import Gate, VectorStore  # local — app/store/base.py (the storage seam)
 
 
 @dataclass(frozen=True)
@@ -47,45 +53,72 @@ class Principal:
 class PreFilterRetriever:
     """The correct shape: the predicate constrains the CANDIDATE SET.
 
-    Real systems push the predicate into the ANN index itself — Azure AI Search
-    calls this `vectorFilterMode: preFilter`, and it constrains the graph
-    traversal. We can't do that with a plain numpy/BM25 index, so we build a
-    per-principal view: the foreign chunks are not in the index being searched.
+    Phase 5 finished this sentence. Until then we SIMULATED pre-filtering by
+    building a separate index per principal and caching it — correct, but the
+    cache key silently became the security boundary (the as_of time-leak had
+    to be pinned by a test). Now the predicate travels WITH the query as a
+    Gate and is enforced inside the store's search — Azure AI Search calls
+    this `vectorFilterMode: preFilter`; Qdrant evaluates the filter during
+    the HNSW traversal. There is no per-principal cache anymore, so there is
+    no key to forget: that entire class of bug is structurally gone.
 
-    The property that matters is the same either way: a chunk the principal
-    cannot see is NEVER A CANDIDATE. There is no window between "retrieved" and
-    "filtered" for anyone to insert a cache, a reranker, or a log into.
+    The property is unchanged and the same tests still assert it: a chunk the
+    principal cannot see is NEVER A CANDIDATE. There is no window between
+    "retrieved" and "filtered" for anyone to insert a cache, a reranker, or a
+    log into.
     """
 
-    def __init__(self, chunks: list[Chunk]) -> None:
-        self._all = chunks
+    def __init__(self, store: VectorStore, embedder: EmbeddingClient | None = None) -> None:
+        self._store = store
+        self._embedder = embedder or build_embedding_client(get_settings())
 
-    @lru_cache(maxsize=32)
-    def _view_for(self, tenant_id: str, groups: frozenset[str], as_of: date) -> HybridRetriever:
-        """Build (and cache) an index containing ONLY what this principal may
-        see, AS THE TERMS STOOD ON as_of.
+    @classmethod
+    def from_chunks(cls, chunks: list[Chunk]) -> "PreFilterRetriever":
+        """Demo/test convenience: embed now, into an in-memory store.
 
-        NOTE the cache key: (tenant_id, groups, as_of) — every input the
-        predicate reads. Caching a view is safe precisely BECAUSE the full
-        predicate is the key. When the date joined the predicate it had to
-        join the key in the same commit: leave it out and a December query
-        gets served January's cached view — the post-filter cache leak all
-        over again, only across TIME instead of across tenants.
+        This is the old constructor's behaviour, kept as a named alternative
+        so the intent is visible at the call site: `from_chunks` says "fixture
+        data, ephemeral", while `PreFilterRetriever(store)` says "the real,
+        already-ingested thing".
         """
-        visible = [c for c in self._all if c.meta and c.meta.visible_to(tenant_id, groups, as_of)]
-        if not visible:
-            raise ValueError(f"no visible chunks for tenant {tenant_id!r} as of {as_of}")
-        return HybridRetriever(visible)
+        from app.ingest.index import ingest_into    # local — app/ingest/index.py
+        from app.store.memory import MemoryStore    # local — app/store/memory.py
+
+        store = MemoryStore()
+        retriever = cls(store)
+        ingest_into(store, chunks, embedder=retriever._embedder)
+        return retriever
 
     def search(
-        self, query: str, principal: Principal, k: int = 10, *, as_of: date | None = None
+        self, query: str, principal: Principal, k: int = 10, *, as_of: date | None = None,
+        pool: int = 20,
     ) -> list[Hit]:
         """as_of defaults to today — the right anchor for "what does my policy
         say?". A claims handler passes the DATE OF LOSS instead: the wording
         that governs a claim is the one in force when the accident happened,
         not the one in force when the question got asked."""
-        view = self._view_for(principal.tenant_id, principal.groups, as_of or date.today())
-        return view.rrf(query, k=k)
+        gate = Gate(principal.tenant_id, principal.groups, as_of or date.today())
+
+        # The gate-visible set drives BOTH legs. Empty means this principal
+        # has nothing at all — a config/ingest problem, not a bad question,
+        # so it raises rather than quietly refusing.
+        visible = self._store.visible_chunks(gate)
+        if not visible:
+            raise ValueError(
+                f"no visible chunks for tenant {gate.tenant_id!r} as of {gate.as_of}"
+            )
+
+        # Dense: the filter travels with the query into the store.
+        qv = _unit_vectors(self._embedder, [query])[0]
+        dense = [
+            Hit(c, rank, score)
+            for rank, (c, score) in enumerate(self._store.search(qv.tolist(), gate, k=pool))
+        ]
+        # Lexical: BM25 over the same gate-visible set (see bm25_rank for why
+        # per-query construction is the honest cheap option here).
+        lexical = bm25_rank(query, visible, k=pool)
+
+        return fuse_rrf([dense, lexical], k=k)
 
 
 class PostFilterRetriever:

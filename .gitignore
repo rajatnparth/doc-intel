@@ -9,3 +9,5 @@ venv/
 .mypy_cache/
 .claude/settings.local.json
 .DS_Store
+# local qdrant data — a database is state, not source
+var/

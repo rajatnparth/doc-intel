@@ -214,7 +214,7 @@ def sweep(answerable: list[float], unanswerable: list[float]) -> None:
 
 def main() -> None:
     print("Loading corpus, embedding, scoring 20 queries through the real pipeline...\n")
-    retriever = PreFilterRetriever(load_corpus())
+    retriever = PreFilterRetriever.from_chunks(load_corpus())
     # The agent view: sees the policy kit AND the claims file, like ACME_FINANCE
     # used to see the contract and the invoice register.
     principal = Principal(*ASHA_AGENT)

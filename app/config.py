@@ -39,6 +39,21 @@ class Settings(BaseSettings):
     # entire provider swap; if it takes more than that, see factory.py.
     embedding_provider: Literal["local", "azure"] = "local"
 
+    # ---- Vector store (phase 5) ----------------------------------------------
+    # "memory" embeds the fixture corpus at boot and dies with the process —
+    # the default, so `git clone && uvicorn` needs zero infrastructure.
+    # "qdrant" is persistent and requires one prior step:
+    #     python -m app.ingest.index
+    # The app then boots read-only and FAILS CLOSED if the store is empty —
+    # serving an empty index would look exactly like "every question refused".
+    vector_store: Literal["memory", "qdrant"] = "memory"
+    # A local FOLDER by default (embedded mode: no server, single process).
+    # Setting qdrant_url flips the SAME client to a server — that one line is
+    # the local-laptop -> docker -> managed-cloud path, config not code.
+    qdrant_path: str = "var/qdrant"
+    qdrant_url: str = ""
+    qdrant_collection: str = "chunks"
+
     # ---- Azure ---------------------------------------------------------------
     # These are Optional-ish (empty string default) because they're only needed
     # when llm_provider == "azure". We enforce that in `validate_for_provider()`

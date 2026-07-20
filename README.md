@@ -20,10 +20,21 @@ cp .env.example .env            # defaults to a stub provider — no Azure key n
 python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
                                 # the API has NO default secret and refuses to
                                 # boot without one — so you generate a real one
-pytest -q                       # 96 tests. First run downloads ~210MB of local
+pytest -q                       # 110 tests. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network. (Tests mint their own ephemeral
                                 # secret — the suite depends on no fixed value.)
+```
+
+Optional — persist the index instead of re-embedding at every boot:
+
+```bash
+echo "VECTOR_STORE=qdrant" >> .env
+python -m app.ingest.index      # embed once -> var/qdrant (run it twice: the
+                                # count doesn't change — upserts are idempotent)
+uvicorn app.main:app            # boots read-only; fails closed if you skipped
+                                # the ingest (an empty index would look exactly
+                                # like "every question refused")
 ```
 
 **No API key required to run any of it.** `LLM_PROVIDER=stub` swaps in a fake
@@ -119,13 +130,19 @@ app/
   ingest/
     loaders.py       bytes -> Sections (structure kept, page furniture stripped)
     chunker.py       Sections -> Chunks (tables atomic, context prepended, parents)
+    index.py         chunk -> embed -> upsert. Run once, not at every boot.
+  store/
+    base.py          VectorStore Protocol + Gate. The third seam: storage.
+    memory.py        embeds at boot, dies with the process (the default)
+    qdrant.py        persistent; filter runs INSIDE the search — the ONLY qdrant import
+    factory.py       one `if`. local folder -> server -> cloud is config, not code.
   retrieval/
     ann_bench.py     exact vs HNSW vs IVF-Flat vs IVF-PQ, measured
     hybrid.py        BM25 + dense, fused by RRF
     gated.py         pre-filter gates, cross-encoder rerank, the refusal path
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
-tests/               executable proof of each claim — 96 tests
+tests/               executable proof of each claim — 110 tests
 ```
 
 **The seam rule:** nothing under `app/llm/` imports FastAPI. Nothing outside it
@@ -169,6 +186,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | `as_of` rides in the request body — and `tenant_id` may not | The contrast IS the rule: `tenant_id` *expands* what you may see, so it must arrive signed (JWT). `as_of` only *selects among versions you already own* — a time cursor inside your authorization scope. Which knobs need a signature is a per-knob decision. |
 | A refusal is a return value, not an exception | `Answer(refused=True, score=...)` — the caller can't forget to handle it, and the score is always reported. On a refusal the generator is **never called**: handed confident-looking irrelevant chunks, models answer anyway. |
 | The seam is a **test**, not a convention | A rule that lives in a README gets violated by the author within the month — measured: it did. `test_seam.py` parses every module's AST, so a lazy `import fastembed` inside a helper function fails CI the same as a top-level one. |
+| The gate is an **argument**, not a cache key | `store.search(vector, gate, k)` — tenant, ACL and as-of travel WITH the query and filter inside the ANN traversal. The old per-principal view cache was correct only while its key listed every predicate input (the `as_of` time-leak had to be test-pinned). A parameter can't be forgotten; a cache key can. Both stores pass the same parametrised gate tests — delete one clause from the Qdrant filter and two go red. |
 | `AUTH_JWT_SECRET` has **no default** — boot fails without it | A service that *can* start in an unsafe state *will* be run in an unsafe state. A boot warning is a log line you grep for after the incident; a boot failure is a deploy that never went out wrong. The only default secret is no secret. |
 
 ---
@@ -190,6 +208,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | P2 | Identity: JWT claims → Principal | ✅ `auth.py`, `test_auth.py` |
 | P3 | Effective-dated version gate (`as_of`) | ✅ date-of-loss retrieval |
 | P4 | Numbers-vs-wording router + system of record | ✅ `router.py`, `policy_admin.py` |
+| P5 | Vector persistence — the gate travels with the query | ✅ `store/`, `test_store.py` |
 
 ---
 

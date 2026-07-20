@@ -116,27 +116,57 @@ class HybridRetriever:
 
     # -- fusion ----------------------------------------------------------------
     def rrf(self, query: str, k: int = 10, pool: int = 20) -> list[Hit]:
-        """Reciprocal Rank Fusion.
+        """Dense + BM25 over this index's chunks, fused. See fuse_rrf for why
+        ranks and only ranks."""
+        return fuse_rrf([self.dense_search(query, pool), self.bm25_search(query, pool)], k=k)
 
-            score(doc) = Σ over retrievers of  1 / (K_RRF + rank)
 
-        RANKS ONLY. Never scores. Why:
-          - BM25 is unbounded and corpus-dependent (18.4 means nothing absolute);
-            cosine is bounded in [-1, 1]. The scales are unrelated.
-          - Min-max normalising is arbitrary: normalise against which maximum?
-          - One BM25 outlier (a rare term repeated) would bury everything dense said.
-          - "You ranked 1st" IS comparable across retrievers. So use only that.
+# =============================================================================
+# The pieces PreFilterRetriever composes over a VectorStore (phase 5): a BM25
+# ranking that can run over ANY chunk list (the store's gate-visible set), and
+# the fusion, extracted so there is exactly one RRF in the codebase.
+# =============================================================================
+def bm25_rank(query: str, chunks: list[Chunk], k: int = 10) -> list[Hit]:
+    """Build-and-rank in one call, for a per-query visible set.
 
-        K_RRF (60) flattens the top: rank 1 contributes 1/61, rank 2 contributes
-        1/62 — barely less. So AGREEMENT between retrievers outweighs any single
-        retriever's confidence. That's the design intent.
-        """
-        fused: dict[int, float] = {}
-        for hits in (self.dense_search(query, pool), self.bm25_search(query, pool)):
-            for h in hits:
-                key = h.chunk.chunk_index
-                fused[key] = fused.get(key, 0.0) + 1.0 / (K_RRF + h.rank)
+    Rebuilding a BM25 index per query LOOKS wasteful and is the honest cheap
+    option: it is pure tokenisation over the gate-visible chunks — no model,
+    milliseconds at this scale. The expensive artifact (embeddings) is what
+    the store persists. At the scale where this line hurts, the store's own
+    lexical machinery (sparse vectors, Azure AI Search hybrid) takes over —
+    server-side, behind the same seam.
 
-        by_index = {c.chunk_index: c for c in self.chunks}
-        ranked = sorted(fused.items(), key=lambda kv: -kv[1])[:k]
-        return [Hit(by_index[i], r, s) for r, (i, s) in enumerate(ranked)]
+    Same zero-score rule as HybridRetriever.bm25_search, same reason.
+    """
+    bm25 = BM25Okapi([tokenize(c.text_to_embed) for c in chunks])
+    scores = bm25.get_scores(tokenize(query))
+    order = [i for i in np.argsort(-scores) if scores[i] > 0.0][:k]
+    return [Hit(chunks[i], r, float(scores[i])) for r, i in enumerate(order)]
+
+
+def fuse_rrf(rankings: list[list[Hit]], k: int = 10) -> list[Hit]:
+    """Reciprocal Rank Fusion.
+
+        score(doc) = Σ over retrievers of  1 / (K_RRF + rank)
+
+    RANKS ONLY. Never scores. Why:
+      - BM25 is unbounded and corpus-dependent (18.4 means nothing absolute);
+        cosine is bounded in [-1, 1]. The scales are unrelated.
+      - Min-max normalising is arbitrary: normalise against which maximum?
+      - One BM25 outlier (a rare term repeated) would bury everything dense said.
+      - "You ranked 1st" IS comparable across retrievers. So use only that.
+
+    K_RRF (60) flattens the top: rank 1 contributes 1/61, rank 2 contributes
+    1/62 — barely less. So AGREEMENT between retrievers outweighs any single
+    retriever's confidence. That's the design intent.
+    """
+    fused: dict[int, float] = {}
+    by_index: dict[int, Chunk] = {}
+    for hits in rankings:
+        for h in hits:
+            key = h.chunk.chunk_index
+            by_index.setdefault(key, h.chunk)
+            fused[key] = fused.get(key, 0.0) + 1.0 / (K_RRF + h.rank)
+
+    ranked = sorted(fused.items(), key=lambda kv: -kv[1])[:k]
+    return [Hit(by_index[i], r, s) for r, (i, s) in enumerate(ranked)]

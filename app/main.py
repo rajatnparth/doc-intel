@@ -26,7 +26,9 @@ from app.llm.base import LLMClient, LLMError, Usage     # local — app/llm/base
 from app.llm.factory import build_llm_client            # local — app/llm/factory.py
 from app.policy_admin import PolicyAdmin, StubPolicyAdmin  # local — app/policy_admin.py
                                         #   (the system of record — numbers live here)
+from app.ingest.index import ingest_into                # local — app/ingest/index.py (memory-mode boot)
 from app.rag import build_prompt, select_sources        # local — app/rag.py (the context budget)
+from app.store.factory import build_vector_store        # local — app/store/factory.py (the storage seam)
 from app.router import FIELD_LABELS, FactField, route   # local — app/router.py
                                         #   (numbers-vs-wording: tier 1 deterministic,
                                         #   tier 2 LLM-classified, both behind Gate 2)
@@ -76,11 +78,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # (a per-request semaphore caps nothing).
     app.state.llm = build_llm_client(settings)
 
-    # The retrieval stack, over the fixture corpus. Construction is cheap: the
-    # per-principal index views are built lazily on first search (and THAT runs
-    # in a threadpool — see _ask_events). Phase 5 replaces load_corpus() with a
-    # real document store + vector DB; this line is the only place that knows.
-    app.state.retriever = PreFilterRetriever(load_corpus())
+    # The retrieval stack, over the vector store (phase 5). memory mode keeps
+    # the old behaviour — embed the fixture corpus at boot; qdrant mode opens
+    # the persisted collection READ-ONLY and refuses to serve if ingestion
+    # never ran: an empty index doesn't error, it just refuses every question,
+    # which is the worse failure because it looks like a model problem.
+    store = build_vector_store(settings)
+    if store.count() == 0:
+        if settings.vector_store == "memory":
+            ingest_into(store, load_corpus())
+        else:
+            store.close()
+            raise RuntimeError(
+                "vector store 'qdrant' is empty — run `python -m app.ingest.index` "
+                "once, then start the server."
+            )
+    app.state.store = store
+    app.state.retriever = PreFilterRetriever(store)
 
     # The system of record — the stub against the fixture corpus. A real
     # deployment swaps in a connector to the insurer's core system; the
@@ -90,6 +104,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.llm.aclose()
+        # Local-mode qdrant holds a folder lock; release it so the ingest CLI
+        # (or the next boot) can open the store. No-op for memory.
+        app.state.store.close()
 
 
 app = FastAPI(

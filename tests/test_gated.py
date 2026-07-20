@@ -29,7 +29,7 @@ def chunks():
 
 @pytest.fixture(scope="module")
 def pre(chunks):
-    return PreFilterRetriever(chunks)
+    return PreFilterRetriever.from_chunks(chunks)
 
 
 # =============================================================================

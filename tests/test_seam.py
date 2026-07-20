@@ -17,8 +17,10 @@ from pathlib import Path                # stdlib — walk the app/ tree
 
 APP = Path(__file__).resolve().parent.parent / "app"
 SEAM = APP / "llm"
+STORE_SEAM = APP / "store"
 
 PROVIDER_SDKS = {"openai", "fastembed"}
+STORE_SDKS = {"qdrant_client"}
 WEB_FRAMEWORK = {"fastapi", "starlette"}
 SEAM_PUBLIC_FACE = {"app.llm", "app.llm.base", "app.llm.factory"}
 
@@ -61,6 +63,29 @@ def test_no_web_framework_inside_the_seam() -> None:
         if (fw := {i for i in _imports(f) if i.split(".")[0] in WEB_FRAMEWORK})
     }
     assert not offenders, f"web framework imported inside app/llm: {offenders}"
+
+
+def test_no_store_sdk_outside_the_storage_seam() -> None:
+    """Phase 5's fence, same shape as the others: `qdrant_client` lives in
+    app/store/qdrant.py and nowhere else. A direct import in retrieval code
+    would weld the gate to one backend — the exact mistake the embedding
+    seam already caught once."""
+    offenders = {
+        str(f.relative_to(APP.parent)): sdks
+        for f in sorted(APP.rglob("*.py"))
+        if f != STORE_SEAM / "qdrant.py"
+        and (sdks := {i for i in _imports(f) if i.split(".")[0] in STORE_SDKS})
+    }
+    assert not offenders, f"store SDK imported outside app/store/qdrant.py: {offenders}"
+
+
+def test_no_web_framework_inside_the_storage_seam() -> None:
+    offenders = {
+        str(f.relative_to(APP.parent)): fw
+        for f in sorted(STORE_SEAM.rglob("*.py"))
+        if (fw := {i for i in _imports(f) if i.split(".")[0] in WEB_FRAMEWORK})
+    }
+    assert not offenders, f"web framework imported inside app/store: {offenders}"
 
 
 def test_only_the_seams_public_face_is_imported() -> None:
