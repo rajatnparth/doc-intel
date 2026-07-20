@@ -5,7 +5,8 @@
       "name": "api",
       "runtimeExecutable": ".venv/bin/uvicorn",
       "runtimeArgs": ["app.main:app", "--port", "8010"],
-      "port": 8010
+      "port": 8010,
+      "autoPort": false
     },
     {
       "name": "ui",

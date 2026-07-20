@@ -1,0 +1,22 @@
+{"id": "ans-01", "kind": "answerable", "question": "how long do I have to pay my renewal premium?", "expected": "2. Premium and Payment"}
+{"id": "ans-02", "kind": "answerable", "question": "what happens if a premium instalment is overdue?", "expected": "2. Premium and Payment"}
+{"id": "ans-03", "kind": "answerable", "question": "is windscreen glass replacement covered?", "expected": "3. Cover and Benefits"}
+{"id": "ans-04", "kind": "answerable", "question": "how quickly must I report an accident?", "expected": "4. Claims Process"}
+{"id": "ans-05", "kind": "answerable", "question": "what does damage code D-4471 mean?", "expected": "5. Damage Assessment Codes"}
+{"id": "ans-06", "kind": "answerable", "question": "what is the status of claim CLM-2026-0891?", "expected": "CLM-2026-0891"}
+{"id": "ans-07", "kind": "answerable", "question": "how much notice is required to cancel the policy?", "expected": "1. Policy and Period of Insurance"}
+{"id": "ans-08", "kind": "answerable", "question": "is there an upper limit on what a claim pays out?", "expected": "7. Limit of Liability"}
+{"id": "ans-09", "kind": "answerable", "question": "when is a claim deemed settled?", "expected": "4. Claims Process"}
+{"id": "ans-10", "kind": "answerable", "question": "what should I do if the car is not driveable?", "expected": "5. Damage Assessment Codes"}
+{"id": "ans-11", "kind": "answerable", "question": "what is my excess for an own damage claim?", "expected": "₹2,000"}
+{"id": "ans-12", "kind": "answerable", "question": "what is my excess for an own damage claim?", "as_of": "2025-12-20", "expected": "₹1,000"}
+{"id": "una-01", "kind": "unanswerable", "question": "is a courtesy car provided during repairs?"}
+{"id": "una-02", "kind": "unanswerable", "question": "who is my claims handler?"}
+{"id": "una-03", "kind": "unanswerable", "question": "what is the no-claims bonus after five years?"}
+{"id": "una-04", "kind": "unanswerable", "question": "am I covered when driving outside the country?"}
+{"id": "una-05", "kind": "unanswerable", "question": "can I add a second driver to the policy?"}
+{"id": "una-06", "kind": "unanswerable", "question": "is there a discount for installing a dashcam?"}
+{"id": "una-07", "kind": "unanswerable", "question": "how do I transfer the policy when I sell the car?"}
+{"id": "una-08", "kind": "unanswerable", "question": "does the policy cover engine damage from waterlogging?"}
+{"id": "una-09", "kind": "unanswerable", "question": "what will next year's renewal premium be?"}
+{"id": "una-10", "kind": "unanswerable", "question": "is my laptop covered if it is stolen from the car?"}
