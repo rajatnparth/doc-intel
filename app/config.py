@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     # serving an empty index would look exactly like "every question refused".
     vector_store: Literal["memory", "qdrant"] = "memory"
 
+    # ---- Safety (phase 8) ----------------------------------------------------
+    # Redact PII (emails, phones, vehicle registrations) from audit records
+    # and handoff notes BEFORE they are written. Default ON: storing
+    # identifiers is the thing you opt INTO, with a reason.
+    audit_redact_pii: bool = True
+
     # ---- Audit trail (phase 6) -----------------------------------------------
     # Where exchange records are appended (one JSON object per line). The
     # JSONL file is the open-core sink; a WORM store / append-only table

@@ -39,6 +39,7 @@ from app.policy_admin import PolicyAdmin, StubPolicyAdmin  # local — app/polic
                                         #   (the system of record — numbers live here)
 from app.ingest.index import ingest_into                # local — app/ingest/index.py (memory-mode boot)
 from app.rag import build_prompt, select_sources        # local — app/rag.py (the context budget)
+from app.safety import Redactor, build_redactor         # local — app/safety.py (PII stays out of storage)
 from app.store.factory import build_vector_store        # local — app/store/factory.py (the storage seam)
 from app.router import FIELD_LABELS, FactField, route   # local — app/router.py
                                         #   (numbers-vs-wording: tier 1 deterministic,
@@ -128,6 +129,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ticketing connector on the private side of the split.
     app.state.audit = JsonlAuditSink(settings.audit_path)
     app.state.tickets = StubTicketStore()
+
+    # Phase 8: identifiers are removed BEFORE anything reaches storage.
+    # Default is the RegexRedactor; NullRedactor is an explicit opt-out.
+    app.state.redactor = build_redactor(settings.audit_redact_pii)
     try:
         yield
     finally:
@@ -173,6 +178,10 @@ def get_tickets(request: Request) -> TicketStore:
     return request.app.state.tickets
 
 
+def get_redactor(request: Request) -> Redactor:
+    return request.app.state.redactor
+
+
 # `Annotated[X, Depends(f)]` is the modern spelling of `x: X = Depends(f)`.
 # It's preferred because the dependency lives in the TYPE, so the parameter can
 # still have a real default, and the annotation is reusable.
@@ -182,6 +191,7 @@ PolicyAdminDep = Annotated[PolicyAdmin, Depends(get_policy_admin)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 AuditDep = Annotated[AuditSink, Depends(get_audit)]
 TicketsDep = Annotated[TicketStore, Depends(get_tickets)]
+RedactorDep = Annotated[Redactor, Depends(get_redactor)]
 
 
 # =============================================================================
@@ -412,6 +422,7 @@ async def _ask_events(
     request: Request,
     request_id: str,
     audit: AuditSink,
+    redactor: Redactor,
 ) -> AsyncIterator[str]:
     # The principal arrived VERIFIED — built in app/auth.py from signed claims,
     # the only request-path place a Principal is constructed. The body-field
@@ -450,6 +461,12 @@ async def _ask_events(
         if capture.usage is not None:
             rec["prompt_tokens"] = capture.usage.prompt_tokens
             rec["completion_tokens"] = capture.usage.completion_tokens
+        # Phase 8: identifiers leave the record BEFORE it touches disk. The
+        # customer-authored fields only — reference numbers the dispute is
+        # ABOUT (policy, claim ids) are preserved by the patterns' design.
+        rec["question"] = redactor.redact(rec["question"])
+        if rec.get("answer_text"):
+            rec["answer_text"] = redactor.redact(rec["answer_text"])
         try:
             audit.write(AuditRecord(**rec))
         except Exception:  # noqa: BLE001 — the record must never kill the stream…
@@ -607,6 +624,7 @@ async def ask(
     policy_admin: PolicyAdminDep,
     settings: SettingsDep,
     audit: AuditDep,
+    redactor: RedactorDep,
 ) -> StreamingResponse:
     """Route -> facts from the system of record, OR retrieve -> gate ->
     refuse or cite + generate. Streamed either way.
@@ -618,7 +636,7 @@ async def ask(
     touches the retriever, the record store, the models, or the corpus."""
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     return StreamingResponse(
-        _ask_events(llm, retriever, policy_admin, settings, principal, req, request, request_id, audit),
+        _ask_events(llm, retriever, policy_admin, settings, principal, req, request, request_id, audit, redactor),
         media_type="text/event-stream",
         headers={**SSE_HEADERS, "x-request-id": request_id},
     )
@@ -634,6 +652,7 @@ async def handoff(
     principal: PrincipalDep,
     audit: AuditDep,
     tickets: TicketsDep,
+    redactor: RedactorDep,
 ):
     """Turn an audited exchange into a ticket for a human.
 
@@ -671,7 +690,9 @@ async def handoff(
         tenant_id=principal.tenant_id,
         question=rec.question,
         reason=rec.refusal_reason or f"customer requested a human after outcome={rec.outcome}",
-        note=req.note,
+        # The note is customer free text headed into a ticketing system whose
+        # retention we don't control — redacted like everything else stored.
+        note=redactor.redact(req.note),
     )
     log.info("handoff created: %s -> %s", rec.request_id, t.ticket_id, extra={"request_id": request_id})
     return HandoffResponse(
