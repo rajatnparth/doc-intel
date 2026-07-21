@@ -155,6 +155,16 @@ class ExtractRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=32_000)
 
 
+class DocumentIngested(BaseModel):
+    """POST /v1/documents response (phase 10): what landed, and whether an
+    earlier version was replaced doing it."""
+
+    doc_title: str
+    chunks: int
+    replaced_chunks: int                # >0 means an older version was removed first
+    tenant_id: str                      # from the VERIFIED token — echoed, never accepted
+
+
 class HandoffRequest(BaseModel):
     """Gate 1 for /v1/handoff (phase 6).
 

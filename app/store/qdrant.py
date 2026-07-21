@@ -133,6 +133,7 @@ class QdrantStore:
                 ("acl", models.PayloadSchemaType.KEYWORD),
                 ("effective_from_ord", models.PayloadSchemaType.INTEGER),
                 ("effective_to_ord", models.PayloadSchemaType.INTEGER),
+                ("doc_title", models.PayloadSchemaType.KEYWORD),  # delete_doc's predicate
             ):
                 self._client.create_payload_index(self._collection, field_name=field, field_schema=schema)
 
@@ -179,6 +180,24 @@ class QdrantStore:
             out.extend(_to_chunk(p.payload) for p in points)
             if offset is None:
                 return out
+
+    def delete_doc(self, doc_title: str, tenant_id: str) -> int:
+        if not self._client.collection_exists(self._collection):
+            return 0
+        doc_filter = models.Filter(
+            must=[
+                models.FieldCondition(key="doc_title", match=models.MatchValue(value=doc_title)),
+                models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)),
+            ]
+        )
+        before = self._client.count(self._collection, count_filter=doc_filter, exact=True).count
+        self._client.delete(
+            self._collection,
+            points_selector=models.FilterSelector(filter=doc_filter),
+            wait=True,   # replace = delete THEN upsert; "eventually gone" would
+                         # let the upsert race the delete it depends on
+        )
+        return before
 
     def count(self) -> int:
         if not self._client.collection_exists(self._collection):

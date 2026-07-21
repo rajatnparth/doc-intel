@@ -10,13 +10,15 @@ read like a paragraph of business logic.
 
 import logging                          # stdlib — structured logs
 import time                             # stdlib — audit duration (monotonic, not wall)
+from datetime import date              # stdlib — upload effective-window fields
 import uuid                             # stdlib — request_id generation
 from contextlib import asynccontextmanager  # stdlib — turns a generator into the
                                         #   lifespan context manager (yield splits it)
 from dataclasses import dataclass, field  # stdlib — StreamCapture is plain mutable state
 from typing import Annotated, AsyncIterator  # stdlib — DI annotation + the stream's type
 
-from fastapi import Depends, FastAPI, Request  # 3rd-party: fastapi — app, DI, raw request
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile  # 3rd-party: fastapi —
+                                        #   app, DI, raw request, multipart upload pieces
 from fastapi.concurrency import run_in_threadpool  # 3rd-party: fastapi (submodule) —
                                         #   push CPU-bound work off the event loop
 from fastapi.responses import JSONResponse, Response, StreamingResponse  # 3rd-party: fastapi
@@ -37,9 +39,14 @@ from app.llm.base import LLMClient, LLMError, Usage     # local — app/llm/base
 from app.llm.factory import build_llm_client            # local — app/llm/factory.py
 from app.policy_admin import PolicyAdmin, StubPolicyAdmin  # local — app/policy_admin.py
                                         #   (the system of record — numbers live here)
-from app.ingest.index import ingest_into                # local — app/ingest/index.py (memory-mode boot)
+from app.ingest import ChunkMeta, chunk_sections        # local — app/ingest/ (upload -> chunks)
+from app.ingest.index import ingest_into                # local — app/ingest/index.py (memory-mode boot + uploads)
+from app.ingest.loaders import SUPPORTED_SUFFIXES, parse_upload  # local — app/ingest/loaders.py
+                                        #   (the format seam: md/pdf/docx today,
+                                        #   Azure Document Intelligence tomorrow)
 from app.ops import (                   # local — app/ops.py (metrics + dependency health)
     AUDIT_WRITE_FAILURES,
+    DOCUMENTS_INGESTED,
     HANDOFF_TICKETS,
     AuditHealth,
     observe_ask,
@@ -61,6 +68,7 @@ from app.retrieval.gated import (       # local — app/retrieval/gated.py (gate
 from app.schemas import (               # local — app/schemas.py
     AskRequest,
     ChatStreamRequest,
+    DocumentIngested,
     ErrorBody,
     ErrorEnvelope,
     HandoffRequest,
@@ -808,3 +816,101 @@ async def handoff(
 #   - except ValidationError -> exactly ONE repair retry, feeding e.errors() back
 #   - second failure -> SchemaRepairFailed. Fail closed. No answer beats a
 #     fabricated invoice total.
+
+
+# -----------------------------------------------------------------------------
+# Phase 10 — /v1/documents: the fixture becomes a feature.
+# -----------------------------------------------------------------------------
+def _doc_error(status: int, code: str, message: str, request_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        headers={"x-request-id": request_id},
+        content=ErrorEnvelope(
+            error=ErrorBody(code=code, message=message, request_id=request_id, retryable=False)
+        ).model_dump(),
+    )
+
+
+@app.post("/v1/documents", response_model=DocumentIngested, status_code=201)
+async def upload_document(
+    request: Request,
+    principal: PrincipalDep,
+    settings: SettingsDep,
+    file: UploadFile = File(...),
+    title: str = Form(..., min_length=3, max_length=120),
+    acl: str = Form("customer,agent"),
+    effective_from: date | None = Form(None),
+    effective_to: date | None = Form(None),
+):
+    """Upload -> parse -> chunk -> embed -> upsert -> immediately answerable.
+
+    The most hostile input this API accepts: attacker-controlled bytes, fed
+    to parser libraries, destined for prompts. Hence the order of the gates
+    below — group, size, type — each failing CLOSED with a client error
+    before the next layer spends any work.
+
+    Note the field split (the phase-3 lesson, third appearance): acl and the
+    effective window arrive from the FORM — they describe the document,
+    inside the uploader's own corpus, where the worst a lie can do is
+    mislabel their own data. tenant_id arrives ONLY from the verified token,
+    because it decides WHOSE corpus changes. And ingestion is a back-office
+    act: the `agent` group is required — a customer never writes the corpus.
+    """
+    request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+
+    if "agent" not in principal.groups:
+        return _doc_error(403, "forbidden", "document ingestion requires the agent role", request_id)
+
+    # Size gate BEFORE parsing: read one byte past the cap so "too big" is
+    # detectable without buffering an unbounded body.
+    data = await file.read(settings.max_upload_bytes + 1)
+    if len(data) > settings.max_upload_bytes:
+        return _doc_error(413, "payload_too_large",
+                          f"upload exceeds {settings.max_upload_bytes} bytes", request_id)
+
+    acl_groups = frozenset(g.strip() for g in acl.split(",") if g.strip())
+    if not acl_groups or not acl_groups <= {"customer", "agent"}:
+        return _doc_error(422, "invalid_acl", "acl must be a subset of: customer, agent", request_id)
+    if effective_from and effective_to and effective_to <= effective_from:
+        return _doc_error(422, "invalid_window", "effective_to must be after effective_from", request_id)
+
+    try:
+        # Parsing is CPU-bound library code over untrusted bytes — off the
+        # event loop, and every failure is the CLIENT's 4xx, never our 500.
+        sections = await run_in_threadpool(
+            parse_upload, file.filename or "", data, doc_title=title
+        )
+    except ValueError as exc:
+        return _doc_error(415, "unsupported_type", str(exc), request_id)
+    except Exception as exc:  # noqa: BLE001 — corrupt uploads are client errors
+        return _doc_error(422, "unparseable", f"could not parse file: {type(exc).__name__}", request_id)
+
+    meta = ChunkMeta(
+        tenant_id=principal.tenant_id,          # the verified token, never the form
+        acl=acl_groups,
+        effective_from=effective_from or date.min,
+        effective_to=effective_to,
+    )
+    chunks = chunk_sections(sections, doc_title=title, meta=meta)
+    if not chunks:
+        return _doc_error(422, "empty_document", "no extractable text in the upload", request_id)
+
+    store = request.app.state.store
+
+    def _replace() -> tuple[int, int]:
+        # REPLACE = delete-then-upsert. Upsert alone would let a shorter
+        # revision orphan the old tail — stale wording, retrievable forever.
+        removed = store.delete_doc(title, principal.tenant_id)
+        written = ingest_into(store, chunks)
+        return removed, written
+
+    removed, written = await run_in_threadpool(_replace)
+
+    DOCUMENTS_INGESTED.inc()
+    log.info(
+        "document ingested: %r (%d chunks, %d replaced)", title, written, removed,
+        extra={"request_id": request_id},
+    )
+    return DocumentIngested(
+        doc_title=title, chunks=written, replaced_chunks=removed, tenant_id=principal.tenant_id
+    )

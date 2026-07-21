@@ -53,6 +53,16 @@ class MemoryStore:
     def visible_chunks(self, gate: Gate) -> list[Chunk]:
         return [c for c, _ in self._visible(gate)]
 
+    def delete_doc(self, doc_title: str, tenant_id: str) -> int:
+        doomed = [
+            key
+            for key, (c, _) in self._rows.items()
+            if c.doc_title == doc_title and c.meta and c.meta.tenant_id == tenant_id
+        ]
+        for key in doomed:
+            del self._rows[key]
+        return len(doomed)
+
     def count(self) -> int:
         return len(self._rows)
 

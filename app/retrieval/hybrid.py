@@ -160,13 +160,20 @@ def fuse_rrf(rankings: list[list[Hit]], k: int = 10) -> list[Hit]:
     1/62 — barely less. So AGREEMENT between retrievers outweighs any single
     retriever's confidence. That's the design intent.
     """
-    fused: dict[int, float] = {}
-    by_index: dict[int, Chunk] = {}
+    # The fusion key is (doc_title, chunk_index) — NOT chunk_index alone.
+    # It was chunk_index alone until phase 10, and every test passed, because
+    # the fixture corpus numbers all chunks globally in one enumerate() —
+    # the fixture was load-bearing. An UPLOADED document numbers its chunks
+    # from 0, colliding with corpus chunk 0, and bare-index fusion silently
+    # merges two unrelated chunks. The bug existed all along; only a new
+    # caller could reveal it.
+    fused: dict[tuple[str, int], float] = {}
+    by_key: dict[tuple[str, int], Chunk] = {}
     for hits in rankings:
         for h in hits:
-            key = h.chunk.chunk_index
-            by_index.setdefault(key, h.chunk)
+            key = (h.chunk.doc_title, h.chunk.chunk_index)
+            by_key.setdefault(key, h.chunk)
             fused[key] = fused.get(key, 0.0) + 1.0 / (K_RRF + h.rank)
 
     ranked = sorted(fused.items(), key=lambda kv: -kv[1])[:k]
-    return [Hit(by_index[i], r, s) for r, (i, s) in enumerate(ranked)]
+    return [Hit(by_key[key], r, s) for r, (key, s) in enumerate(ranked)]
