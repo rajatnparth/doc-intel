@@ -44,4 +44,6 @@ rank-bm25>=0.2.2
 # qdrant-client : the vector store (phase 5). Local embedded mode by default —
 #                 the same client speaks to a folder, a server, or their cloud.
 qdrant-client>=1.12
+# prometheus-client : /metrics (phase 9) — counters + the scrape text format.
+prometheus-client>=0.20
 fastembed>=0.4
