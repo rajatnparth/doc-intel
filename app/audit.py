@@ -99,6 +99,18 @@ class AuditSink(Protocol):
         REFERENCES the audited exchange rather than copying it."""
         ...
 
+    def probe(self) -> None:
+        """Raise if a write would fail right now; return None otherwise.
+
+        Exists because of a deadlock phase 9's tests caught: under strict
+        admission ("no record, no answer"), a failed write flips the health
+        flag, the flag blocks all exchanges — and with no exchanges there
+        are no writes left to discover the disk came back. Recovery must
+        not depend on traffic being admitted, so the READINESS PROBE calls
+        this instead: the orchestrator's own polling becomes the retry loop.
+        """
+        ...
+
 
 class JsonlAuditSink:
     """One JSON object per line, appended. Honest about its scale: get() is a
@@ -121,6 +133,13 @@ class JsonlAuditSink:
         line = record.model_dump_json() + "\n"
         with self._lock, self._path.open("a", encoding="utf-8") as f:
             f.write(line)
+
+    def probe(self) -> None:
+        # The same operation write() performs, minus the record: open for
+        # append. A full disk, a vanished mount, a permissions change — all
+        # fail here exactly as they would fail a real write.
+        with self._lock, self._path.open("a", encoding="utf-8"):
+            pass
 
     def get(self, request_id: str) -> AuditRecord | None:
         if not self._path.exists():

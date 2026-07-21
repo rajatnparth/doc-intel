@@ -19,7 +19,7 @@ from typing import Annotated, AsyncIterator  # stdlib — DI annotation + the st
 from fastapi import Depends, FastAPI, Request  # 3rd-party: fastapi — app, DI, raw request
 from fastapi.concurrency import run_in_threadpool  # 3rd-party: fastapi (submodule) —
                                         #   push CPU-bound work off the event loop
-from fastapi.responses import JSONResponse, StreamingResponse  # 3rd-party: fastapi
+from fastapi.responses import JSONResponse, Response, StreamingResponse  # 3rd-party: fastapi
                                         #   (submodule) — JSON errors + the SSE stream
 
 from app.audit import (                 # local — app/audit.py (the exchange record)
@@ -38,6 +38,13 @@ from app.llm.factory import build_llm_client            # local — app/llm/fact
 from app.policy_admin import PolicyAdmin, StubPolicyAdmin  # local — app/policy_admin.py
                                         #   (the system of record — numbers live here)
 from app.ingest.index import ingest_into                # local — app/ingest/index.py (memory-mode boot)
+from app.ops import (                   # local — app/ops.py (metrics + dependency health)
+    AUDIT_WRITE_FAILURES,
+    HANDOFF_TICKETS,
+    AuditHealth,
+    observe_ask,
+    render_metrics,
+)
 from app.rag import build_prompt, select_sources        # local — app/rag.py (the context budget)
 from app.safety import Redactor, build_redactor         # local — app/safety.py (PII stays out of storage)
 from app.store.factory import build_vector_store        # local — app/store/factory.py (the storage seam)
@@ -133,6 +140,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Phase 8: identifiers are removed BEFORE anything reaches storage.
     # Default is the RegexRedactor; NullRedactor is an explicit opt-out.
     app.state.redactor = build_redactor(settings.audit_redact_pii)
+
+    # Phase 9: the audit sink's health, observed from real writes — the flag
+    # admission control and /ready both read. Starts optimistic; the first
+    # failed write flips it, the next success restores it.
+    app.state.audit_health = AuditHealth()
     try:
         yield
     finally:
@@ -182,6 +194,10 @@ def get_redactor(request: Request) -> Redactor:
     return request.app.state.redactor
 
 
+def get_audit_health(request: Request) -> AuditHealth:
+    return request.app.state.audit_health
+
+
 # `Annotated[X, Depends(f)]` is the modern spelling of `x: X = Depends(f)`.
 # It's preferred because the dependency lives in the TYPE, so the parameter can
 # still have a real default, and the annotation is reusable.
@@ -192,6 +208,7 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 AuditDep = Annotated[AuditSink, Depends(get_audit)]
 TicketsDep = Annotated[TicketStore, Depends(get_tickets)]
 RedactorDep = Annotated[Redactor, Depends(get_redactor)]
+AuditHealthDep = Annotated[AuditHealth, Depends(get_audit_health)]
 
 
 # =============================================================================
@@ -233,13 +250,62 @@ async def llm_error_handler(request: Request, exc: LLMError) -> JSONResponse:
 # =============================================================================
 @app.get("/health")
 async def health(settings: SettingsDep) -> dict[str, str]:
-    """Liveness. Deliberately does NOT call the LLM.
-
-    A health check that hits your provider means a provider blip takes your pods
-    out of rotation — you amplify their outage into yours. Liveness answers
-    "is this process alive?", not "is the world well?".
+    """Liveness. Deliberately does NOT call the LLM — or the store, or the
+    sink. A liveness failure means RESTART THE POD; put a dependency check
+    here and a store blip makes the orchestrator restart-loop every healthy
+    pod, amplifying a hiccup into a fleet outage. Dependencies belong in
+    /ready, whose failure just means "no traffic for now".
     """
     return {"status": "ok", "provider": settings.llm_provider}
+
+
+@app.get("/ready")
+async def ready(
+    request: Request,
+    settings: SettingsDep,
+    audit: AuditDep,
+    audit_health: AuditHealthDep,
+) -> JSONResponse:
+    """Readiness: should THIS instance receive traffic right now?
+
+    Checks what serving actually needs: an open, non-empty vector store (the
+    phase-5 fail-closed boot check, made continuous) and an audit sink that
+    can accept a write. The sink check is an ACTIVE probe, and that is the
+    recovery mechanism, not an optimisation: under strict admission the flag
+    blocks all exchanges, so no exchange can ever discover the disk came
+    back — the orchestrator's own readiness polling becomes the retry loop,
+    and rotation back in is automatic. (The deadlock this design replaces
+    was caught by test_ops.py, not foresight — recorded honestly.)
+    """
+    checks: dict[str, str] = {}
+
+    try:
+        # count() is file/lock IO on the qdrant path — off the event loop,
+        # like every other blocking call in this file.
+        n = await run_in_threadpool(request.app.state.store.count)
+        checks["store"] = "ok" if n > 0 else "empty"
+    except Exception as exc:  # noqa: BLE001 — a probe reports, never raises
+        checks["store"] = f"unreachable: {type(exc).__name__}"
+
+    try:
+        await run_in_threadpool(audit.probe)
+        audit_health.mark_ok()          # the probe IS the recovery path
+        checks["audit"] = "ok"
+    except Exception:  # noqa: BLE001 — a probe reports, never raises
+        audit_health.mark_failed()
+        checks["audit"] = "failing writes"
+
+    ok = checks["store"] == "ok" and checks["audit"] == "ok"
+    return JSONResponse(status_code=200 if ok else 503, content={"ready": ok, **checks})
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    """The scraper's contract: current counter values, Prometheus text
+    format. Aggregate numbers only — outcomes, durations, tokens; never a
+    tenant label (cardinality + the phase-8 minimization argument, again).
+    """
+    return Response(content=render_metrics(), media_type="text/plain; version=0.0.4")
 
 
 # -----------------------------------------------------------------------------
@@ -423,6 +489,7 @@ async def _ask_events(
     request_id: str,
     audit: AuditSink,
     redactor: Redactor,
+    audit_health: AuditHealth,
 ) -> AsyncIterator[str]:
     # The principal arrived VERIFIED — built in app/auth.py from signed claims,
     # the only request-path place a Principal is constructed. The body-field
@@ -469,12 +536,20 @@ async def _ask_events(
             rec["answer_text"] = redactor.redact(rec["answer_text"])
         try:
             audit.write(AuditRecord(**rec))
+            audit_health.mark_ok()
         except Exception:  # noqa: BLE001 — the record must never kill the stream…
             # …but a swallowed audit failure is a compliance hole, so it is
-            # the loudest thing this module logs. The strict variant — refuse
-            # to ANSWER when the sink is down — belongs with ops (phase 9),
-            # because it needs sink health-checking to not be a self-DoS.
+            # the loudest thing this module logs — and (phase 9) it flips the
+            # health flag that admission control and /ready read: under
+            # AUDIT_STRICT, the NEXT exchange is refused at the door.
+            audit_health.mark_failed()
+            AUDIT_WRITE_FAILURES.inc()
             log.exception("AUDIT WRITE FAILED — exchange not recorded", extra={"request_id": request_id})
+        # The metric and the record must agree about what happened — same
+        # finally, same fields. (No tenant labels: see app/ops.py.)
+        observe_ask(
+            rec["outcome"], rec["duration_ms"], rec.get("prompt_tokens"), rec.get("completion_tokens")
+        )
 
 
 async def _ask_events_inner(
@@ -625,7 +700,8 @@ async def ask(
     settings: SettingsDep,
     audit: AuditDep,
     redactor: RedactorDep,
-) -> StreamingResponse:
+    audit_health: AuditHealthDep,
+):
     """Route -> facts from the system of record, OR retrieve -> gate ->
     refuse or cite + generate. Streamed either way.
 
@@ -635,8 +711,30 @@ async def ask(
     401 happens BEFORE this body runs: an unauthenticated request never
     touches the retriever, the record store, the models, or the corpus."""
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+
+    # Phase 9 — "no record, no answer", enforced AT ADMISSION. The flag was
+    # flipped by a real failed write, so this check costs nothing per
+    # request; and refusing HERE — before the 200 is spent — means we can
+    # still say no cleanly, with a Retry-After, instead of erroring
+    # mid-stream. One exchange (the one that discovered the failure) always
+    # slips through un-audited; that is the price of not pre-writing a fake
+    # record, and the metric counts it.
+    if settings.audit_strict and not audit_health.ok:
+        return JSONResponse(
+            status_code=503,
+            headers={"x-request-id": request_id, "Retry-After": "30"},
+            content=ErrorEnvelope(
+                error=ErrorBody(
+                    code="audit_unavailable",
+                    message="exchanges cannot be recorded right now; refusing to serve unrecorded answers",
+                    request_id=request_id,
+                    retryable=True,
+                )
+            ).model_dump(),
+        )
+
     return StreamingResponse(
-        _ask_events(llm, retriever, policy_admin, settings, principal, req, request, request_id, audit, redactor),
+        _ask_events(llm, retriever, policy_admin, settings, principal, req, request, request_id, audit, redactor, audit_health),
         media_type="text/event-stream",
         headers={**SSE_HEADERS, "x-request-id": request_id},
     )
@@ -694,6 +792,7 @@ async def handoff(
         # retention we don't control — redacted like everything else stored.
         note=redactor.redact(req.note),
     )
+    HANDOFF_TICKETS.inc()
     log.info("handoff created: %s -> %s", rec.request_id, t.ticket_id, extra={"request_id": request_id})
     return HandoffResponse(
         ticket_id=t.ticket_id,

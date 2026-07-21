@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # serving an empty index would look exactly like "every question refused".
     vector_store: Literal["memory", "qdrant"] = "memory"
 
+    # ---- Ops (phase 9) -------------------------------------------------------
+    # "No record, no answer": when the audit sink is failing, refuse NEW
+    # exchanges at admission (503 + Retry-After) instead of serving un-audited
+    # answers. Default ON — in a compliance product, "we briefly refused" is
+    # a better Monday than "we can't prove what we told customers". The
+    # opt-out is for deployments where availability outranks the record.
+    audit_strict: bool = True
+
     # ---- Safety (phase 8) ----------------------------------------------------
     # Redact PII (emails, phones, vehicle registrations) from audit records
     # and handoff notes BEFORE they are written. Default ON: storing

@@ -20,7 +20,7 @@ cp .env.example .env            # defaults to a stub provider — no Azure key n
 python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
                                 # the API has NO default secret and refuses to
                                 # boot without one — so you generate a real one
-pytest -q                       # 129 tests + a CI-gated eval scorecard. First run downloads ~210MB of local
+pytest -q                       # 134 tests + a CI-gated eval scorecard. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network. (Tests mint their own ephemeral
                                 # secret — the suite depends on no fixed value.)
@@ -120,6 +120,7 @@ app/
   policy_admin.py    The system of record (Protocol + stub). Numbers live HERE.
   rag.py             The context budget: parents deduped, chars capped, [n] cited
   safety.py          PII -> typed placeholders BEFORE storage. Dispute refs survive.
+  ops.py             /metrics counters (refusal rate is the star) + audit health.
   audit.py           One record per exchange: what was asked, retrieved, scored, DELIVERED
   handoff.py         Refusal -> ticket. References the audit record; copies nothing.
   main.py            FastAPI app, DI, error envelope, routes (incl. /v1/ask)
@@ -146,7 +147,7 @@ app/
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
 evals/               labelled cases + scorecard + measured baseline — the CI ratchet
-tests/               executable proof of each claim — 129 tests
+tests/               executable proof of each claim — 134 tests
 ui/                  reference client (React SPA): renders the SSE contract —
                      facts vs cited answers vs refusals. See ui/README.md.
 ```
@@ -198,6 +199,8 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | The eval baseline is **measured**, not aspired to | `evals/baseline.json` records what the pipeline actually does — 2 false refusals and 1 wording-layer false answer included, because they're real (calibrate.py). The CI gate is a ratchet against WORSE; a gate demanding zero fails on day one and is ignored by day three. All 117 behavior tests stayed green through a major embedder upgrade — the eval is the only thing that would have noticed a ranking regression. |
 | **Containment** beats injection detection | A detector must win every adversarial round; containment bounds the blast radius when it loses. Gates, `as_of`, the refusal threshold, the record lookup and routing are deterministic code the model never controls — a hostile document can be retrieved and cited, but it cannot cross tenants, flip a route, or pick another customer's record (`test_safety.py` asserts each). What a real model would *obey* inside extracts is a model property — that requires real-model adversarial evals, and this repo says so instead of pretending a stub can test it. |
 | PII becomes **typed placeholders** before storage | `[EMAIL]` / `[PHONE]` / `[VEHICLE-REG]` in audit records and handoff notes — the dispute keeps its narrative, the identifier is never on disk, and identity is already present as the *verified* `tenant_id`. The patterns are deliberately narrow: policy/claim/damage-code references survive, because redacting the numbers the dispute is ABOUT defeats the audit. Default ON — storing identifiers is what needs the documented reason. |
+| Liveness and readiness are **different questions** | `/health` = "alive?" → restart; it checks no dependencies, ever — a store blip must not restart-loop healthy pods. `/ready` = "traffic?" → rotation; it checks the store AND actively probes the audit sink. No `tenant_id` metric labels: every label value is a time series stored forever, and it would re-leak what phase 8 minimized. |
+| "No record, no answer" recovers via the **probe**, not traffic | Strict admission refuses at the door (503 + Retry-After) while the sink is failing — and that created a deadlock the tests caught, not foresight: with all exchanges blocked, no write remained to discover the disk came back. So `/ready`'s active probe is the retry loop — the orchestrator's own polling flips the flag and rotation back in is automatic. One exchange always slips through un-audited (the one that discovers the failure); pre-writing a fake record to prevent it would defeat the record's defining field: what was DELIVERED. |
 | `AUTH_JWT_SECRET` has **no default** — boot fails without it | A service that *can* start in an unsafe state *will* be run in an unsafe state. A boot warning is a log line you grep for after the incident; a boot failure is a deploy that never went out wrong. The only default secret is no secret. |
 
 ---
@@ -223,6 +226,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | P6 | Audit trail + human handoff | ✅ `audit.py`, `handoff.py`, `POST /v1/handoff` |
 | P7 | Evals in CI — quality regressions fail the build | ✅ `evals/`, `test_evals.py` |
 | P8 | Injection containment + PII redaction | ✅ `safety.py`, `test_safety.py` |
+| P9 | Ops: /metrics, /ready, strict audit admission | ✅ `ops.py`, `test_ops.py` |
 
 ---
 
