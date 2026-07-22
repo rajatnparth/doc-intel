@@ -82,6 +82,13 @@ class AuditRecord(BaseModel):
     refusal_reason: str = ""
     error_code: str = ""
 
+    # Phase 11 — how the question was searched. A dispute handler needs to
+    # know whether an exchange ran on the user's words alone (degraded) or on
+    # transformed phrasings, because that changes what "we could not find it"
+    # means.
+    query_variants: int = 1
+    rewrite_degraded: bool = False
+
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     duration_ms: int = 0

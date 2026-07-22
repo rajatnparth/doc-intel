@@ -89,36 +89,52 @@ class PreFilterRetriever:
         ingest_into(store, chunks, embedder=retriever._embedder)
         return retriever
 
-    def search(
-        self, query: str, principal: Principal, k: int = 10, *, as_of: date | None = None,
-        pool: int = 20,
+    def search_many(
+        self, queries: list[str], principal: Principal, k: int = 10, *,
+        as_of: date | None = None, pool: int = 20,
     ) -> list[Hit]:
-        """as_of defaults to today — the right anchor for "what does my policy
-        say?". A claims handler passes the DATE OF LOSS instead: the wording
-        that governs a claim is the one in force when the accident happened,
-        not the one in force when the question got asked."""
-        gate = Gate(principal.tenant_id, principal.groups, as_of or date.today())
+        """Retrieve for SEVERAL phrasings of one question and fuse the lot.
 
-        # The gate-visible set drives BOTH legs. Empty means this principal
-        # has nothing at all — a config/ingest problem, not a bad question,
-        # so it raises rather than quietly refusing.
+        Each query contributes a dense ranking and a lexical ranking over the
+        same gate-visible set; RRF fuses all 2N rankings. Fusion by rank is
+        what makes this safe to do with heterogeneous queries: a HyDE
+        pseudo-answer and the user's original question produce scores on
+        incomparable scales, but "you ranked 1st for this phrasing" is
+        comparable across all of them (see fuse_rrf).
+
+        A chunk that several phrasings agree on rises — which is exactly the
+        agreement-over-confidence property K_RRF was chosen for.
+        """
+        gate = Gate(principal.tenant_id, principal.groups, as_of or date.today())
         visible = self._store.visible_chunks(gate)
         if not visible:
             raise ValueError(
                 f"no visible chunks for tenant {gate.tenant_id!r} as of {gate.as_of}"
             )
 
-        # Dense: the filter travels with the query into the store.
-        qv = _unit_vectors(self._embedder, [query])[0]
-        dense = [
-            Hit(c, rank, score)
-            for rank, (c, score) in enumerate(self._store.search(qv.tolist(), gate, k=pool))
-        ]
-        # Lexical: BM25 over the same gate-visible set (see bm25_rank for why
-        # per-query construction is the honest cheap option here).
-        lexical = bm25_rank(query, visible, k=pool)
+        rankings: list[list[Hit]] = []
+        for q in queries:
+            if not q.strip():
+                continue
+            qv = _unit_vectors(self._embedder, [q])[0]
+            rankings.append([
+                Hit(c, rank, score)
+                for rank, (c, score) in enumerate(self._store.search(qv.tolist(), gate, k=pool))
+            ])
+            rankings.append(bm25_rank(q, visible, k=pool))
+        return fuse_rrf(rankings, k=k)
 
-        return fuse_rrf([dense, lexical], k=k)
+    def search(
+        self, query: str, principal: Principal, k: int = 10, *, as_of: date | None = None,
+        pool: int = 20,
+    ) -> list[Hit]:
+        """One phrasing — the single-query case of search_many.
+
+        as_of defaults to today — the right anchor for "what does my policy
+        say?". A claims handler passes the DATE OF LOSS instead: the wording
+        that governs a claim is the one in force when the accident happened,
+        not the one in force when the question got asked."""
+        return self.search_many([query], principal, k, as_of=as_of, pool=pool)
 
 
 class PostFilterRetriever:
@@ -189,9 +205,39 @@ def rerank(
     choice, not a calibration: sigmoid is monotonic, so it changes no ranking and
     creates no information. You still have to MEASURE where to cut (calibrate.py).
     """
+    return rerank_many([query], chunks, reranker=reranker)
+
+
+def rerank_many(
+    queries: list[str],
+    chunks: list[Chunk],
+    *,
+    reranker: RerankClient | None = None,
+) -> list[tuple[Chunk, float]]:
+    """Score each chunk against EVERY phrasing and keep its best.
+
+    Max-over-phrasings, not mean: the question being asked is "does any
+    faithful phrasing of this question match this passage?", and a passage
+    that one phrasing matches perfectly is a good passage even if three
+    other phrasings miss it. Averaging would punish exactly the case this
+    phase exists to rescue — measured on a real PDF, the same chunk scores
+    0.0886 for the user's words and 0.9998 for the document's.
+
+    Cost is linear in phrasings: N queries x |chunks| cross-encoder pairs.
+    That is the price of the fix and it is measured, not assumed —
+    `python -m evals.ablation` reports it per configuration.
+    """
     reranker = reranker or build_reranker(get_settings())
-    raw = reranker.rerank(query, [c.text_to_embed for c in chunks])
-    scored = [(c, _sigmoid(r)) for c, r in zip(chunks, raw)]
+    texts = [c.text_to_embed for c in chunks]
+
+    best: list[float] = [float("-inf")] * len(chunks)
+    for q in queries:
+        if not q.strip():
+            continue
+        for i, raw in enumerate(reranker.rerank(q, texts)):
+            best[i] = max(best[i], float(raw))
+
+    scored = [(c, _sigmoid(s)) for c, s in zip(chunks, best)]
     return sorted(scored, key=lambda t: -t[1])
 
 
@@ -227,13 +273,23 @@ def answer(
     threshold: float = REFUSAL_THRESHOLD,
     pool: int = 20,
     top_k: int = 5,
+    queries: list[str] | None = None,
 ) -> Answer:
-    """The full gated path. Returns an Answer; never calls a generator itself."""
-    hits = retriever.search(query, principal, k=pool, as_of=as_of)  # pre-filtered, always
+    """The full gated path. Returns an Answer; never calls a generator itself.
+
+    `queries` are alternative phrasings of `query` (app/retrieval/rewrite.py),
+    used for BOTH retrieval and reranking. They are a retrieval device only:
+    the gate still decides on real chunks from the principal's own corpus,
+    and what reaches the prompt is unchanged. Default — and every failure
+    path upstream — is `[query]`, i.e. exactly the pre-phase-11 behaviour.
+    """
+    phrasings = [q for q in (queries or [query]) if q.strip()] or [query]
+
+    hits = retriever.search_many(phrasings, principal, k=pool, as_of=as_of)  # pre-filtered, always
     if not hits:
         return Answer(True, 0.0, [], [], "no candidates after gates")
 
-    ranked = rerank(query, [h.chunk for h in hits])
+    ranked = rerank_many(phrasings, [h.chunk for h in hits])
     best_chunk, best_score = ranked[0]
 
     if best_score < threshold:

@@ -48,6 +48,33 @@ class Settings(BaseSettings):
     # serving an empty index would look exactly like "every question refused".
     vector_store: Literal["memory", "qdrant"] = "memory"
 
+    # ---- Query transformation (phase 11) -------------------------------------
+    # Rewrite the question into the corpus's vocabulary before retrieving.
+    # Measured motivation: the same chunk scores 0.089 for a user's phrasing
+    # and 0.9998 for the document's (README, "the finding I didn't expect").
+    # Costs one model call per wording question — bounded, cached, and
+    # degrading to the original query on ANY failure, so switching it on can
+    # never be worse than switching it off.
+    query_rewrite: bool = True
+    # PARAPHRASES beyond the HyDE hypothetical answer, which is always
+    # requested. Default 0 because `python -m evals.ablation` measured it:
+    #
+    #   baseline   hit@5 10/12  2 false refusals   302 rerank pairs
+    #   +rewrites  hit@5 11/12  1 false refusal    906 pairs   (3.0x)
+    #   +hyde      hit@5 11/12  1 false refusal    604 pairs   (2.0x)  <- default
+    #   all        hit@5 11/12  1 false refusal   1208 pairs   (4.0x)
+    #
+    # The hypothetical answer captures the entire measured benefit; the
+    # paraphrases add cost and nothing else on this set. Raise it when your
+    # own corpus says otherwise — the point is that the number came from a
+    # table, not from taste.
+    query_rewrite_variants: int = Field(0, ge=0, le=4)
+    # Rewrites depend only on the question text, so one process-wide cache is
+    # safe — see the argument in app/retrieval/rewrite_cache.py before
+    # raising this, because "a cache key is a security boundary" is a lesson
+    # this codebase learned the hard way (phase 5).
+    query_rewrite_cache_size: int = Field(512, ge=0)
+
     # ---- Documents (phase 10) ------------------------------------------------
     # Upload size cap, enforced BEFORE parsing: a parser fed unbounded
     # attacker bytes is a denial-of-service invitation. 413 at the door.
