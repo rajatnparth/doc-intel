@@ -152,6 +152,29 @@ def chunk_document(
     overlap_chars: int = 120,
     meta: "ChunkMeta | None" = None,
 ) -> list[Chunk]:
+    """Markdown in, chunks out — load_markdown + chunk_sections.
+
+    Kept as the convenience entrypoint; the WORK lives in chunk_sections,
+    because phase 10 made the input format a seam: PDF and DOCX loaders
+    produce the same Sections, and the chunker must not care who did.
+    """
+    return chunk_sections(
+        load_markdown(text, doc_title=doc_title),
+        doc_title=doc_title,
+        max_chars=max_chars,
+        overlap_chars=overlap_chars,
+        meta=meta,
+    )
+
+
+def chunk_sections(
+    sections: list[Section],
+    *,
+    doc_title: str,
+    max_chars: int = 700,
+    overlap_chars: int = 120,
+    meta: "ChunkMeta | None" = None,
+) -> list[Chunk]:
     """The real thing. Structure-aware, table-safe, context-enriched,
     parent-aware. This is what you would defend in the interview.
 
@@ -159,7 +182,6 @@ def chunk_document(
     not per-chunk, because tenancy and permissions are properties of the document
     you ingested — the chunker has no business deciding them.
     """
-    sections: list[Section] = load_markdown(text, doc_title=doc_title)
     chunks: list[Chunk] = []
 
     for section in sections:

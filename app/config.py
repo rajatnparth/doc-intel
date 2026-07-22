@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # serving an empty index would look exactly like "every question refused".
     vector_store: Literal["memory", "qdrant"] = "memory"
 
+    # ---- Documents (phase 10) ------------------------------------------------
+    # Upload size cap, enforced BEFORE parsing: a parser fed unbounded
+    # attacker bytes is a denial-of-service invitation. 413 at the door.
+    max_upload_bytes: int = Field(5_000_000, ge=1)
+
     # ---- Ops (phase 9) -------------------------------------------------------
     # "No record, no answer": when the audit sink is failing, refuse NEW
     # exchanges at admission (503 + Retry-After) instead of serving un-audited

@@ -74,6 +74,11 @@ HANDOFF_TICKETS = Counter(
     "Human-handoff tickets created",
     registry=REGISTRY,
 )
+DOCUMENTS_INGESTED = Counter(
+    "documents_ingested_total",
+    "Documents accepted through /v1/documents",
+    registry=REGISTRY,
+)
 
 
 def observe_ask(outcome: str, duration_ms: int, prompt_tokens: int | None, completion_tokens: int | None) -> None:

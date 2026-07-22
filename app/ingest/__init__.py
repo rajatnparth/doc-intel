@@ -18,6 +18,7 @@ from app.ingest.chunker import (        # local — app/ingest/chunker.py
     Chunk,
     ChunkMeta,
     chunk_document,
+    chunk_sections,
     naive_chunks,
 )
 from app.ingest.loaders import Section, load_markdown               # local — app/ingest/loaders.py
@@ -29,6 +30,7 @@ __all__ = [
     "ChunkMeta",
     "Section",
     "chunk_document",
+    "chunk_sections",
     "naive_chunks",
     "load_markdown",
 ]

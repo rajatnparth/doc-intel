@@ -67,6 +67,18 @@ class VectorStore(Protocol):
         """Everything the gate permits, unranked. Feeds the in-process BM25."""
         ...
 
+    def delete_doc(self, doc_title: str, tenant_id: str) -> int:
+        """Remove every chunk of one document. Returns how many went.
+
+        Exists because REPLACE must be delete-then-upsert: deterministic ids
+        make v2's chunks overwrite v1's — but only the ids v2 also produces.
+        A shorter revision would orphan the old tail (v1 chunks 12..19:
+        stale wording, silently retrievable, forever) — so the old document
+        goes first. tenant_id is part of the predicate for the same reason
+        it is part of every other one: a title is not a permission.
+        """
+        ...
+
     def count(self) -> int:
         """Total stored chunks (all tenants). For boot checks and idempotency
         tests — never for serving decisions."""
