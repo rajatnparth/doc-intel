@@ -80,6 +80,16 @@ export type Frame =
   | ErrorEvent
   | DoneEvent;
 
+/** POST /v1/documents response (phase 10). `replaced_chunks` > 0 means an
+ * earlier version of the same title was deleted first — the delete-then-upsert
+ * semantics, surfaced so the operator can SEE a replacement happen. */
+export interface DocumentIngested {
+  doc_title: string;
+  chunks: number;
+  replaced_chunks: number;
+  tenant_id: string;
+}
+
 /** POST /v1/handoff response — the ticket the refusal card renders. */
 export interface HandoffResponse {
   ticket_id: string;

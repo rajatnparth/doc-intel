@@ -10,6 +10,7 @@ The qdrant store here is REAL (embedded local mode in a tmp dir), not mocked:
 a mocked store would prove our mock filters correctly, which proves nothing.
 """
 
+from concurrent.futures import ThreadPoolExecutor  # stdlib — the cross-thread regression
 from datetime import date               # stdlib — as_of anchors
 
 import pytest                           # 3rd-party: pytest — fixtures, params
@@ -101,6 +102,39 @@ def test_search_returns_k_visible_results_not_k_minus_filtered(store) -> None:
 # =============================================================================
 # Persistence — qdrant only, because that is the promise memory doesn't make
 # =============================================================================
+def test_qdrant_writes_survive_being_called_from_another_thread(tmp_path) -> None:
+    """The /v1/documents 500, as a test.
+
+    FastAPI runs blocking work in a THREADPOOL, so the store is built on one
+    thread (boot) and called from another (the request). Qdrant local mode
+    persists through SQLite, whose objects are thread-affine — the first real
+    upload died with "SQLite objects created in a thread can only be used in
+    that same thread". Reads had survived by luck (local mode answers them
+    from memory); only writes touch SQLite, so phase 10's request-path write
+    was the first code to hit it.
+
+    The suite missed it because conftest pins VECTOR_STORE=memory (hermetic,
+    deliberate) and the qdrant tests above call the store from the test's own
+    thread. This test does what the server does.
+    """
+    s = QdrantStore(path=str(tmp_path / "qdrant"), collection="chunks")
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            written = pool.submit(ingest_into, s, load_corpus()).result()
+            assert written > 0, "a write dispatched from a worker thread must land"
+
+            # Not one-shot luck: a DIFFERENT worker thread, and a delete —
+            # the other SQLite-touching path (replace = delete-then-upsert).
+            removed = pool.submit(s.delete_doc, "Claims File — Asha Rao", "asha").result()
+            assert removed > 0
+
+            # And reads still work from yet another thread.
+            visible = pool.submit(s.visible_chunks, Gate(*ASHA_AGENT, NOW)).result()
+            assert visible and all(c.doc_title != "Claims File — Asha Rao" for c in visible)
+    finally:
+        s.close()
+
+
 def test_qdrant_survives_a_restart(tmp_path) -> None:
     path = str(tmp_path / "qdrant")
 

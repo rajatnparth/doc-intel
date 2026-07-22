@@ -5,7 +5,7 @@
  * you can see the protocol instead of trusting a wrapper.
  */
 
-import type { AskRequest, Frame, HandoffResponse } from "./types";
+import type { AskRequest, DocumentIngested, Frame, HandoffResponse } from "./types";
 
 /** HTTP headers may only carry ISO-8859-1, and a JWT is narrower still —
  * base64url segments joined by dots, pure printable ASCII. Anything outside
@@ -106,6 +106,41 @@ export async function* askStream(
     // stops the provider's meter). The Stop button is wired to real money.
     reader.cancel().catch(() => {});
   }
+}
+
+/** POST /v1/documents — multipart upload: parse -> chunk -> embed -> upsert.
+ *
+ * FormData, not JSON: the body carries bytes. Note what is NOT sent —
+ * tenant_id. It is stamped server-side from the verified token, because it
+ * decides WHOSE corpus changes; the fields below only DESCRIBE the document
+ * inside the uploader's own corpus. The browser sets its own multipart
+ * content-type boundary, so we must not set that header ourselves. */
+export async function uploadDocument(
+  file: File,
+  title: string,
+  acl: string[],
+  token: string,
+  effectiveFrom?: string,
+  effectiveTo?: string,
+): Promise<DocumentIngested> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("title", title);
+  form.append("acl", acl.join(","));
+  if (effectiveFrom) form.append("effective_from", effectiveFrom);
+  if (effectiveTo) form.append("effective_to", effectiveTo);
+
+  const res = await fetch("/v1/documents", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const e = body?.error ?? {};
+    throw new ApiError(res.status, e.code ?? String(res.status), e.message ?? `HTTP ${res.status}`, false);
+  }
+  return (await res.json()) as DocumentIngested;
 }
 
 /** POST /v1/handoff — turn a refused (or any audited) exchange into a ticket.

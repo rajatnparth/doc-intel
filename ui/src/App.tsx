@@ -12,7 +12,7 @@
 
 import { useRef, useState } from "react";
 import { askStream, createHandoff, tokenProblem, ApiError } from "./api";
-import { FactsCard, RefusalCard, SourcesPanel, StreamedAnswer } from "./components";
+import { FactsCard, RefusalCard, SourcesPanel, StreamedAnswer, UploadPanel } from "./components";
 import type { FactsEvent, HandoffResponse, RefusalEvent, SourceRef, Usage } from "./types";
 
 interface Exchange {
@@ -178,6 +178,8 @@ export default function App() {
         </label>
       </section>
       {tokenError && <div className="error token-error">{tokenError}</div>}
+
+      <UploadPanel token={token} />
 
       <main>
         {exchanges.length === 0 && (

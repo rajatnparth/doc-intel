@@ -200,6 +200,65 @@ main { flex: 1; padding: 16px 0; }
 
 .token-error { margin-top: 10px; font-size: 13.5px; }
 
+/* Ingestion panel — collapsed by default: asking is the common act. */
+.upload { margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.upload summary {
+  cursor: pointer;
+  padding: 9px 14px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.upload[open] summary { border-bottom: 1px solid var(--line); }
+.upload-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.upload-body .field { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.upload-body .field > span:first-child { color: var(--muted); min-width: 68px; }
+.upload-body input[type="text"] {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.upload-body input[type="date"] {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+}
+.upload-body input[type="file"] { font-size: 12.5px; color: var(--muted); }
+.upload-body .acl { display: flex; gap: 14px; }
+.upload-body .acl label { display: flex; align-items: center; gap: 5px; }
+.upload-body .window { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.upload-body button {
+  align-self: flex-start;
+  padding: 8px 20px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+  cursor: pointer;
+}
+.upload-body button:disabled { opacity: 0.45; cursor: default; }
+.ingested {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  color: var(--accent);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.ingested .hint { color: var(--muted); font-size: 12.5px; }
+
 footer {
   display: flex;
   gap: 10px;
