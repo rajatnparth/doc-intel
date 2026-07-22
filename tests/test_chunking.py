@@ -5,7 +5,60 @@ The assertions ARE the lesson: each one names a technique and shows it working.
 
 from pathlib import Path                # stdlib — locate + read the sample doc
 
-import pytest                           # 3rd-party: pytest — the @pytest.fixture below
+import pytest                           # 3rd-party: pytest
+
+from app.ingest.chunker import _split_long_body  # local — the cap under test
+
+
+# =============================================================================
+# The cap is a GUARANTEE, not an aspiration (found by a real PDF upload)
+# =============================================================================
+# PDF text extraction hard-wraps lines and emits NO blank lines. Measured on a
+# real 4-page policy PDF: 0 "\n\n", 131 "\n". The old splitter only knew
+# "\n\n", so it returned the section whole — a 6,613-char chunk against a
+# 700-char budget, which the embedder (512 tokens ≈ 2,000 chars) then
+# silently truncated. Every sample document is markdown WITH blank lines, so
+# nothing in the suite had ever exercised the other shape.
+PDF_SHAPED = "\n".join(
+    f"Line {i} of a hard-wrapped policy paragraph that never sees a blank line."
+    for i in range(40)
+)
+
+
+def test_splitter_honours_the_cap_without_blank_lines() -> None:
+    pieces = _split_long_body(PDF_SHAPED, 300)
+    assert len(pieces) > 1, "PDF-shaped text must still split"
+    assert all(len(p) <= 300 for p in pieces), [len(p) for p in pieces]
+
+
+def test_splitter_honours_the_cap_with_no_separators_at_all() -> None:
+    """A wall of characters — no blank lines, no newlines, no sentence ends.
+    The hard cut is what turns the maximum into a promise that always holds."""
+    pieces = _split_long_body("x" * 2000, 300)
+    assert all(len(p) <= 300 for p in pieces)
+    assert "".join(pieces) == "x" * 2000, "a cut must not lose text"
+
+
+def test_splitter_prefers_the_most_structural_boundary() -> None:
+    """Given blank lines, use them — the cascade must not skip to a finer
+    separator and shred paragraphs that would have fit."""
+    body = "\n\n".join(["A" * 200, "B" * 200, "C" * 200])
+    pieces = _split_long_body(body, 450)
+    assert pieces[0] == "A" * 200 + "\n\n" + "B" * 200
+    assert pieces[1] == "C" * 200
+
+
+def test_finished_chunks_respect_max_chars_including_overlap() -> None:
+    """max_chars means the size of the CHUNK. The overlap prefix is part of
+    the chunk, so the split budget must leave room for it — measuring the cap
+    before the last thing that grows the text produced 825-char chunks
+    against a 700 budget."""
+    from app.ingest import chunk_document
+
+    doc = "# Kit\n\n## 1. Cover\n\n" + PDF_SHAPED
+    for c in chunk_document(doc, doc_title="Kit", max_chars=400, overlap_chars=80):
+        assert len(c.text) <= 400, f"{len(c.text)} > 400: {c.text[:80]!r}"
+
 
 from app.ingest import chunk_document, load_markdown, naive_chunks  # local — app/ingest/
 

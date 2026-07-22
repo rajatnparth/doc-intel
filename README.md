@@ -20,7 +20,7 @@ cp .env.example .env            # defaults to a stub provider — no Azure key n
 python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
                                 # the API has NO default secret and refuses to
                                 # boot without one — so you generate a real one
-pytest -q                       # 145 tests + a CI-gated eval scorecard. First run downloads ~210MB of local
+pytest -q                       # 150 tests + a CI-gated eval scorecard. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network. (Tests mint their own ephemeral
                                 # secret — the suite depends on no fixed value.)
@@ -148,7 +148,7 @@ app/
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
 evals/               labelled cases + scorecard + measured baseline — the CI ratchet
-tests/               executable proof of each claim — 145 tests
+tests/               executable proof of each claim — 150 tests
 ui/                  reference client (React SPA): renders the SSE contract —
                      facts vs cited answers vs refusals. See ui/README.md.
 ```
@@ -202,6 +202,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | PII becomes **typed placeholders** before storage | `[EMAIL]` / `[PHONE]` / `[VEHICLE-REG]` in audit records and handoff notes — the dispute keeps its narrative, the identifier is never on disk, and identity is already present as the *verified* `tenant_id`. The patterns are deliberately narrow: policy/claim/damage-code references survive, because redacting the numbers the dispute is ABOUT defeats the audit. Default ON — storing identifiers is what needs the documented reason. |
 | Liveness and readiness are **different questions** | `/health` = "alive?" → restart; it checks no dependencies, ever — a store blip must not restart-loop healthy pods. `/ready` = "traffic?" → rotation; it checks the store AND actively probes the audit sink. No `tenant_id` metric labels: every label value is a time series stored forever, and it would re-leak what phase 8 minimized. |
 | "No record, no answer" recovers via the **probe**, not traffic | Strict admission refuses at the door (503 + Retry-After) while the sink is failing — and that created a deadlock the tests caught, not foresight: with all exchanges blocked, no write remained to discover the disk came back. So `/ready`'s active probe is the retry loop — the orchestrator's own polling flips the flag and rotation back in is automatic. One exchange always slips through un-audited (the one that discovers the failure); pre-writing a fake record to prevent it would defeat the record's defining field: what was DELIVERED. |
+| The chunk cap is a **guarantee**, not an aspiration | The splitter only knew blank lines — fine for markdown, and PDF text extraction emits **none** (measured: 0 blank lines, 131 single newlines in a real 4-page policy). So it returned sections whole: a **6,613-char chunk against a 700-char budget**, which the embedder (512 tokens ≈ 2,000 chars) then silently truncated — ~70% of the document invisible to retrieval. Now a cascade (blank lines → lines → sentences → hard cut) enforces the cap totally, and the budget subtracts the overlap prefix, because measuring a maximum *before* the last thing that grows the text is not measuring it. Same document: **2 chunks → 19**, answer chunk ranked #1. |
 | Upload **replace** is delete-then-upsert | Deterministic ids make v2's chunks overwrite v1's — but only the ids v2 also produces. A shorter revision would orphan the old tail: stale wording, silently retrievable, forever. So the old document goes first (`delete_doc`, tenant-scoped — a title is not a permission). Sabotage-verified: skip the delete and the orphan test goes red. |
 | The upload form describes; the token **decides** | `acl` and the effective window arrive from the form — they select within the uploader's own corpus, where a lie only mislabels their own data. `tenant_id` arrives only from the verified JWT, because it decides WHOSE corpus changes. Ingestion needs the `agent` role: customers never write the corpus. And the fixture's global `enumerate` was load-bearing: uploads exposed that RRF keyed on bare `chunk_index` — two documents' chunk 0 would silently merge. The key is now `(doc_title, chunk_index)`; the bug existed all along, only a new caller could reveal it. |
 | `AUTH_JWT_SECRET` has **no default** — boot fails without it | A service that *can* start in an unsafe state *will* be run in an unsafe state. A boot warning is a log line you grep for after the incident; a boot failure is a deploy that never went out wrong. The only default secret is no secret. |
@@ -336,6 +337,19 @@ said no is not a metric.**
 The refusal gate has a **false refusal that no threshold can fix** — and since the
 motor-insurance conversion, a matching **false answer** on the other side. Finding
 the pair is the most useful thing in this repo.
+
+> **Reproduced on a document this repo did not write.** A real third-party
+> roadside-assistance policy PDF was uploaded and asked *"how many times can I
+> avail the policy in a year?"* — a question the document answers in plain text
+> (*"…up to 4 times in a year"*). Retrieval was perfect: that chunk ranked **#1**,
+> at 0.0886, with every other chunk at 0.0000. Re-asked in the document's own
+> vocabulary — *"how many times is complimentary road side assistance available in
+> a year?"* — the **same chunk** scored **0.9998**. Same passage, same answer, an
+> 11,000× swing on phrasing alone. And no threshold rescues it: an *unanswerable*
+> question in `evals/cases.jsonl` scores **0.778** while this *answerable* one
+> scores **0.089**, so the score is not monotonic with answerability at all.
+> The fix is a domain-tuned reranker, which is exactly what the eval ratchet
+> exists to judge.
 
 *"Is there an upper limit on what a claim pays out?"* is answerable — section 7
 covers it. Retrieval surfaces the right chunk. The cross-encoder **ranks it #1**.
