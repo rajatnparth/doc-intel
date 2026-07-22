@@ -111,7 +111,15 @@ def _looks_like_heading(line: str) -> bool:
     if _NUMBERED_HEADING_RE.match(line):
         return True
     # Short, shouty, and not a sentence: "GENERAL EXCLUSIONS"
-    return line.isupper() and not line.endswith((".", ":", ";", ","))
+    if line.isupper() and not line.endswith((".", ":", ";", ",")):
+        return True
+    # A short label ending in a colon: "Terms & Conditions:", "How to Avail:",
+    # "General Exclusions:". Added after a real policy PDF turned out to use
+    # this form for EVERY heading and none of the two above — the sample
+    # corpus had taught the heuristics a house style that real documents
+    # don't share. Bounded to ~6 words so a sentence that happens to end in
+    # a colon ("...in the situations that are indicated below:") stays prose.
+    return line.endswith(":") and len(line.split()) <= 6
 
 
 def load_pdf(data: bytes, *, doc_title: str) -> list[Section]:
