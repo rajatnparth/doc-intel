@@ -18,6 +18,8 @@ from __future__ import annotations      # stdlib (special) — lazy annotations;
 
 import uuid                             # stdlib — uuid5 for DETERMINISTIC point ids
 import warnings                         # stdlib — silence one KNOWN local-mode warning
+from concurrent.futures import ThreadPoolExecutor  # stdlib — the ONE owning thread;
+                                        #   see QdrantStore's docstring (SQLite affinity)
 from datetime import date               # stdlib — payload date encoding
 
 from qdrant_client import QdrantClient, models  # 3rd-party: qdrant-client — the store SDK
@@ -105,10 +107,44 @@ def _gate_filter(gate: Gate) -> models.Filter:
 
 
 class QdrantStore:
+    """THREAD AFFINITY — the reason for the executor below.
+
+    Local mode persists through SQLite, and SQLite objects may only be used
+    on the thread that created them. The app builds this store once at boot
+    (the main thread) and then calls it from FastAPI's THREADPOOL, because
+    embedding and reranking are CPU-bound and must stay off the event loop
+    (section 1.1). Those two facts collide: `/v1/documents` 500'd with
+    "SQLite objects created in a thread can only be used in that same
+    thread" on the very first real upload.
+
+    Reads had survived by luck — local mode answers them from memory and
+    only touches SQLite on WRITE — so the bug waited for phase 10 to
+    introduce a request-path write.
+
+    The fix is confined HERE rather than smeared across callers: the client
+    is created on, and every call is dispatched to, ONE dedicated thread.
+    The Protocol stays synchronous, every call site is unchanged, and the
+    constraint stays inside the implementation that has it — a server-mode
+    client (HTTP, thread-safe) pays only one queue hop for the same code.
+    """
+
     def __init__(self, *, path: str = "", url: str = "", collection: str = "chunks") -> None:
-        # url wins: pointing at a server is the deliberate act.
-        self._client = QdrantClient(url=url) if url else QdrantClient(path=path)
+        # max_workers=1 IS the mechanism: one thread owns the client for its
+        # entire life. Anything more re-creates the bug.
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="qdrant-store")
         self._collection = collection
+        # Constructed ON the pool thread, so creation and use agree.
+        # url wins: pointing at a server is the deliberate act.
+        self._client = self._run(lambda: QdrantClient(url=url) if url else QdrantClient(path=path))
+
+    def _run(self, fn):
+        """Dispatch to the owning thread and block for the result.
+
+        NEVER call this from inside a method already running on the pool
+        thread — with a single worker, that deadlocks. Public methods wrap
+        exactly one _run; the private *_impl methods call each other directly.
+        """
+        return self._pool.submit(fn).result()
 
     # -- writes ---------------------------------------------------------------
     def _ensure_collection(self, dim: int) -> None:
@@ -137,7 +173,12 @@ class QdrantStore:
             ):
                 self._client.create_payload_index(self._collection, field_name=field, field_schema=schema)
 
+    # Public methods dispatch to the owning thread; the _impl bodies below
+    # already run there and must never re-enter _run (single worker = deadlock).
     def upsert(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
+        self._run(lambda: self._upsert_impl(chunks, vectors))
+
+    def _upsert_impl(self, chunks: list[Chunk], vectors: list[list[float]]) -> None:
         if not chunks:
             return
         self._ensure_collection(dim=len(vectors[0]))
@@ -152,6 +193,9 @@ class QdrantStore:
 
     # -- reads ----------------------------------------------------------------
     def search(self, vector: list[float], gate: Gate, k: int) -> list[tuple[Chunk, float]]:
+        return self._run(lambda: self._search_impl(vector, gate, k))
+
+    def _search_impl(self, vector: list[float], gate: Gate, k: int) -> list[tuple[Chunk, float]]:
         if not self._client.collection_exists(self._collection):
             return []
         res = self._client.query_points(
@@ -164,6 +208,9 @@ class QdrantStore:
         return [(_to_chunk(p.payload), float(p.score)) for p in res.points]
 
     def visible_chunks(self, gate: Gate) -> list[Chunk]:
+        return self._run(lambda: self._visible_chunks_impl(gate))
+
+    def _visible_chunks_impl(self, gate: Gate) -> list[Chunk]:
         if not self._client.collection_exists(self._collection):
             return []
         out: list[Chunk] = []
@@ -182,6 +229,9 @@ class QdrantStore:
                 return out
 
     def delete_doc(self, doc_title: str, tenant_id: str) -> int:
+        return self._run(lambda: self._delete_doc_impl(doc_title, tenant_id))
+
+    def _delete_doc_impl(self, doc_title: str, tenant_id: str) -> int:
         if not self._client.collection_exists(self._collection):
             return 0
         doc_filter = models.Filter(
@@ -200,11 +250,18 @@ class QdrantStore:
         return before
 
     def count(self) -> int:
+        return self._run(self._count_impl)
+
+    def _count_impl(self) -> int:
         if not self._client.collection_exists(self._collection):
             return 0
         return self._client.count(self._collection, exact=True).count
 
     def close(self) -> None:
         """Local mode holds a lock on the folder; release it so another
-        process (the ingest CLI, a second uvicorn) can open the store."""
-        self._client.close()
+        process (the ingest CLI, a second uvicorn) can open the store.
+
+        The close must run on the owning thread too — then the thread itself
+        is retired, or a long-lived process leaks one per store."""
+        self._run(self._client.close)
+        self._pool.shutdown(wait=True)

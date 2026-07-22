@@ -30,6 +30,24 @@ Open http://localhost:5173, paste the token, ask. The Vite dev server proxies
 `/v1` to `localhost:8000`, so there is no CORS configuration to add (and none
 shipped by accident).
 
+## Adding a document
+
+Expand **"Add a document to the corpus"** at the top, pick a `.md`, `.pdf` or
+`.docx`, give it a title, and upload. The result line reports how many chunks
+were embedded — that count is the proof the ingestion pipeline ran end to end
+(parse → chunk → embed → upsert), and the document is queryable immediately,
+with no restart.
+
+Two things to notice:
+
+- Uploading needs an **agent** token (`--groups agent`); a customer token gets
+  a 403, because customers never write the corpus.
+- Re-upload the same title with a shorter revision: the result says how many
+  chunks were *replaced*. That is delete-then-upsert — the old version's tail
+  is gone rather than orphaned in the index.
+
+Then ask a question in the document's own words to see it cited.
+
 Things worth trying (each verified against the running stack):
 
 - *"what is my excess for an own damage claim?"* — the router catches the
