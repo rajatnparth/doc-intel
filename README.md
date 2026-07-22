@@ -50,6 +50,7 @@ through a stream — and untested resilience is decorative.
 python loadtest.py                 # 30 concurrent + 429s: what the boundary buys, measured
 python gated_demo.py               # tenant isolation, a live cross-tenant leak, refusal
 python -m app.retrieval.calibrate  # where the refusal threshold comes from
+python -m evals.reranker_ablation  # is that number a confidence, or just a rank?
 python hybrid_demo.py              # retrieval failures, with real embeddings
 python -m app.retrieval.ann_bench  # the recall you sell for latency, measured
 python chunk_demo.py               # why chunk size is not a number you pick
@@ -350,6 +351,34 @@ the pair is the most useful thing in this repo.
 > scores **0.089**, so the score is not monotonic with answerability at all.
 > The fix is a domain-tuned reranker, which is exactly what the eval ratchet
 > exists to judge.
+
+### The obvious fix, tested and refuted
+
+"Our reranker is too small" is the natural hypothesis — `ms-marco-MiniLM-L-6-v2`
+is a 22M-parameter model from 2020. `python -m evals.reranker_ablation` tests it
+across the labelled set. For each model it finds the **kindest threshold that
+exists**, by exhaustive sweep, and reports what still goes wrong there:
+
+| reranker | rank@1 | best possible threshold | errors remaining at it |
+|---|---|---|---|
+| `ms-marco-MiniLM-L-6-v2` (80MB, shipped) | 11/12 | 0.774 | 2 FR + 1 FA |
+| `jina-reranker-v1-turbo-en` (150MB) | **12/12** | 0.297 | 1 FR + 1 FA |
+| `bge-reranker-base` (1.04GB) | 11/12 | 0.140 | 1 FR + 1 FA |
+
+A bigger model **does** help — jina ranks every answerable case first and buys
+back one false refusal. But **no model reaches zero at any threshold**, and the
+optimal thresholds scatter across 0.14–0.77. That is the finding in one line:
+
+> **A cross-encoder score orders candidates WITHIN a query. It means nothing
+> ACROSS queries** — nothing in the training objective makes 0.4 for question A
+> commensurable with 0.4 for question B. The gate compares every query's score
+> against one global constant, which is a type error, and it is why an
+> unanswerable question scores 0.778 while an answerable one scores 0.089.
+
+Size is not the axis (jina beats a model 7× larger), so the fixes are elsewhere:
+**transform the query** so the phrasing gap never opens, **fine-tune** so scores
+mean something in this domain, or **replace the score gate with a groundedness
+verdict** and pay a model call for it.
 
 *"Is there an upper limit on what a claim pays out?"* is answerable — section 7
 covers it. Retrieval surfaces the right chunk. The cross-encoder **ranks it #1**.
