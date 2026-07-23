@@ -3,12 +3,16 @@
 [![CI](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml/badge.svg)](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml)
 
 **A multi-tenant document intelligence API** — upload policy documents and
-claims records, ask questions, get cited answers. The demo corpus is motor
-insurance (an invented insurer, two policyholders, an effective-dated prior
-policy year);
-the engine is domain-agnostic. Built to be *defended*, not demoed: every design
-decision here has a failure mode attached, and most of them have a test that
-fails when you remove the fix.
+claims records, ask questions, get cited answers. The domain is motor insurance
+(an invented insurer, two policyholders, an effective-dated prior policy year),
+and it is deliberately concrete: the prompts, the fact router's field set and
+the corpus are insurance-specific, because a closed field list is what makes
+the router's injection containment airtight. Everything underneath — the
+provider seams, ingestion, hybrid retrieval, the tenant and effective-date
+gates, audit, handoff, ops and the eval harness — carries no domain knowledge
+and moves to another domain unchanged. Built to be *defended*, not demoed:
+every design decision here has a failure mode attached, and most of them have
+a test that fails when you remove the fix.
 
 Python · FastAPI · async · Azure OpenAI · embeddings · hybrid vector search · RAG
 
