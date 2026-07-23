@@ -79,6 +79,16 @@ DOCUMENTS_INGESTED = Counter(
     "Documents accepted through /v1/documents",
     registry=REGISTRY,
 )
+# Phase 11. `outcome` is the label that matters: "degraded" means the
+# rewriter was unavailable and the exchange ran on the original query alone.
+# A silent degradation is a quality incident nobody notices — this is how it
+# becomes visible, and an alert on the degraded rate is the point of it.
+QUERY_REWRITES = Counter(
+    "query_rewrites_total",
+    "Query transformation attempts by outcome",
+    ["outcome"],                        # rewritten | degraded | cached | disabled
+    registry=REGISTRY,
+)
 
 
 def observe_ask(outcome: str, duration_ms: int, prompt_tokens: int | None, completion_tokens: int | None) -> None:

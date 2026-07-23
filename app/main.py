@@ -47,6 +47,7 @@ from app.ingest.loaders import SUPPORTED_SUFFIXES, parse_upload  # local — app
 from app.ops import (                   # local — app/ops.py (metrics + dependency health)
     AUDIT_WRITE_FAILURES,
     DOCUMENTS_INGESTED,
+    QUERY_REWRITES,
     HANDOFF_TICKETS,
     AuditHealth,
     observe_ask,
@@ -59,6 +60,8 @@ from app.router import FIELD_LABELS, FactField, route   # local — app/router.p
                                         #   (numbers-vs-wording: tier 1 deterministic,
                                         #   tier 2 LLM-classified, both behind Gate 2)
 from app.retrieval.corpus import load_corpus            # local — app/retrieval/corpus.py (fixture)
+from app.retrieval.rewrite import transform          # local — app/retrieval/rewrite.py (phase 11)
+from app.retrieval.rewrite_cache import RewriteCache  # local — app/retrieval/rewrite_cache.py
 from app.retrieval.gated import (       # local — app/retrieval/gated.py (gates + refusal)
     REFUSAL_THRESHOLD,
     Principal,
@@ -148,6 +151,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Phase 8: identifiers are removed BEFORE anything reaches storage.
     # Default is the RegexRedactor; NullRedactor is an explicit opt-out.
     app.state.redactor = build_redactor(settings.audit_redact_pii)
+
+    # Phase 11: rewrites are a pure function of the question, so one bounded
+    # process-wide cache serves every tenant safely — the argument is in
+    # app/retrieval/rewrite_cache.py, because a cache key is a security
+    # boundary in this codebase and owes one.
+    app.state.rewrite_cache = RewriteCache(settings.query_rewrite_cache_size)
 
     # Phase 9: the audit sink's health, observed from real writes — the flag
     # admission control and /ready both read. Starts optimistic; the first
@@ -609,12 +618,44 @@ async def _ask_events_inner(
         yield done_frame()
         return
 
+    # PHASE 11 — transform the question into the corpus's vocabulary before
+    # retrieving. Deliberately AFTER the router: a facts question is already
+    # answered from the system of record and must not pay for a rewrite.
+    # Cache first (it is a pure function of the question — see
+    # rewrite_cache.py for why sharing entries across tenants is safe here
+    # and was not for the villain), then the model, then — on any failure —
+    # the original query alone, which is exactly pre-phase-11 behaviour.
+    transformed = request.app.state.rewrite_cache.get(
+        req.question, settings.query_rewrite_variants
+    )
+    if transformed is not None:
+        QUERY_REWRITES.labels(outcome="cached").inc()
+    else:
+        transformed = await transform(
+            req.question,
+            llm,
+            enabled=settings.query_rewrite,
+            max_variants=settings.query_rewrite_variants,
+        )
+        request.app.state.rewrite_cache.put(
+            req.question, settings.query_rewrite_variants, transformed
+        )
+        QUERY_REWRITES.labels(
+            outcome="disabled" if not settings.query_rewrite
+            else "degraded" if transformed.degraded
+            else "rewritten"
+        ).inc()
+
+    rec["query_variants"] = len(transformed.all_queries)
+    rec["rewrite_degraded"] = transformed.degraded
+
     # Embedding the query, building a first-use index view, and cross-encoding
     # 20 candidates are all CPU-bound. Run them inline and they block the event
     # loop — every OTHER live stream stalls while this one thinks. Async buys
     # occupancy only if the loop stays free (1.1); the threadpool keeps it free.
     a = await run_in_threadpool(
-        answer, req.question, principal, retriever, as_of=req.as_of
+        answer, req.question, principal, retriever,
+        as_of=req.as_of, queries=transformed.all_queries,
     )
 
     if a.refused:

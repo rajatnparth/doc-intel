@@ -3,12 +3,16 @@
 [![CI](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml/badge.svg)](https://github.com/rajatnparth/doc-intel/actions/workflows/ci.yml)
 
 **A multi-tenant document intelligence API** — upload policy documents and
-claims records, ask questions, get cited answers. The demo corpus is motor
-insurance (an invented insurer, two policyholders, an effective-dated prior
-policy year);
-the engine is domain-agnostic. Built to be *defended*, not demoed: every design
-decision here has a failure mode attached, and most of them have a test that
-fails when you remove the fix.
+claims records, ask questions, get cited answers. The domain is motor insurance
+(an invented insurer, two policyholders, an effective-dated prior policy year),
+and it is deliberately concrete: the prompts, the fact router's field set and
+the corpus are insurance-specific, because a closed field list is what makes
+the router's injection containment airtight. Everything underneath — the
+provider seams, ingestion, hybrid retrieval, the tenant and effective-date
+gates, audit, handoff, ops and the eval harness — carries no domain knowledge
+and moves to another domain unchanged. Built to be *defended*, not demoed:
+every design decision here has a failure mode attached, and most of them have
+a test that fails when you remove the fix.
 
 Python · FastAPI · async · Azure OpenAI · embeddings · hybrid vector search · RAG
 
@@ -20,7 +24,7 @@ cp .env.example .env            # defaults to a stub provider — no Azure key n
 python -c "import secrets; print(f'AUTH_JWT_SECRET={secrets.token_hex(32)}')" >> .env
                                 # the API has NO default secret and refuses to
                                 # boot without one — so you generate a real one
-pytest -q                       # 150 tests + a CI-gated eval scorecard. First run downloads ~210MB of local
+pytest -q                       # 166 tests + a CI-gated eval scorecard. First run downloads ~210MB of local
                                 # models (embedder + cross-encoder); after that,
                                 # no network. (Tests mint their own ephemeral
                                 # secret — the suite depends on no fixed value.)
@@ -50,6 +54,8 @@ through a stream — and untested resilience is decorative.
 python loadtest.py                 # 30 concurrent + 429s: what the boundary buys, measured
 python gated_demo.py               # tenant isolation, a live cross-tenant leak, refusal
 python -m app.retrieval.calibrate  # where the refusal threshold comes from
+python -m evals.reranker_ablation  # is that number a confidence, or just a rank?
+python -m evals.ablation           # what each retrieval stage buys, and costs
 python hybrid_demo.py              # retrieval failures, with real embeddings
 python -m app.retrieval.ann_bench  # the recall you sell for latency, measured
 python chunk_demo.py               # why chunk size is not a number you pick
@@ -119,6 +125,7 @@ app/
   router.py          Numbers vs wording: tier 1 deterministic, tier 2 an LLM verdict behind Gate 2.
   policy_admin.py    The system of record (Protocol + stub). Numbers live HERE.
   rag.py             The context budget: parents deduped, chars capped, [n] cited
+  retrieval/rewrite.py  Query -> phrasings the CORPUS uses. Degrades to the original.
   safety.py          PII -> typed placeholders BEFORE storage. Dispute refs survive.
   ops.py             /metrics counters (refusal rate is the star) + audit health.
   audit.py           One record per exchange: what was asked, retrieved, scored, DELIVERED
@@ -148,7 +155,7 @@ app/
     calibrate.py     where the threshold comes from + why a refusal happened
     corpus.py        2 policyholders, 1 effective-dated prior-year kit — the fixture
 evals/               labelled cases + scorecard + measured baseline — the CI ratchet
-tests/               executable proof of each claim — 150 tests
+tests/               executable proof of each claim — 166 tests
 ui/                  reference client (React SPA): renders the SSE contract —
                      facts vs cited answers vs refusals. See ui/README.md.
 ```
@@ -232,6 +239,7 @@ quarter already came: `EMBEDDING_PROVIDER=local|azure` is the whole swap.
 | P8 | Injection containment + PII redaction | ✅ `safety.py`, `test_safety.py` |
 | P9 | Ops: /metrics, /ready, strict audit admission | ✅ `ops.py`, `test_ops.py` |
 | P10 | Documents: `POST /v1/documents` — upload -> answerable | ✅ md/pdf/docx, `test_documents.py` |
+| P11 | Query transformation — close the phrasing gap | ✅ `rewrite.py`, `evals/ablation.py` |
 
 ---
 
@@ -350,6 +358,66 @@ the pair is the most useful thing in this repo.
 > scores **0.089**, so the score is not monotonic with answerability at all.
 > The fix is a domain-tuned reranker, which is exactly what the eval ratchet
 > exists to judge.
+
+### The obvious fix, tested and refuted
+
+"Our reranker is too small" is the natural hypothesis — `ms-marco-MiniLM-L-6-v2`
+is a 22M-parameter model from 2020. `python -m evals.reranker_ablation` tests it
+across the labelled set. For each model it finds the **kindest threshold that
+exists**, by exhaustive sweep, and reports what still goes wrong there:
+
+| reranker | rank@1 | best possible threshold | errors remaining at it |
+|---|---|---|---|
+| `ms-marco-MiniLM-L-6-v2` (80MB, shipped) | 11/12 | 0.774 | 2 FR + 1 FA |
+| `jina-reranker-v1-turbo-en` (150MB) | **12/12** | 0.297 | 1 FR + 1 FA |
+| `bge-reranker-base` (1.04GB) | 11/12 | 0.140 | 1 FR + 1 FA |
+
+A bigger model **does** help — jina ranks every answerable case first and buys
+back one false refusal. But **no model reaches zero at any threshold**, and the
+optimal thresholds scatter across 0.14–0.77. That is the finding in one line:
+
+> **A cross-encoder score orders candidates WITHIN a query. It means nothing
+> ACROSS queries** — nothing in the training objective makes 0.4 for question A
+> commensurable with 0.4 for question B. The gate compares every query's score
+> against one global constant, which is a type error, and it is why an
+> unanswerable question scores 0.778 while an answerable one scores 0.089.
+
+Size is not the axis (jina beats a model 7× larger), so the fixes are elsewhere:
+**transform the query** so the phrasing gap never opens, **fine-tune** so scores
+mean something in this domain, or **replace the score gate with a groundedness
+verdict** and pay a model call for it.
+
+### What transformation buys, and what it costs
+
+The first of those is shipped, and `python -m evals.ablation` is why. Four
+configurations over the labelled set — the question alone, plus paraphrases,
+plus a HyDE hypothetical answer, and everything:
+
+| config | hit@5 | false refusals | false answers | rerank pairs | secs |
+|---|---|---|---|---|---|
+| baseline | 10/12 | 2 | 1 | 302 | 6.0 |
+| `+rewrites` | 11/12 | 1 | 1 | 906 (3.0×) | 12.6 |
+| **`+hyde`** | **11/12** | **1** | **1** | **604 (2.0×)** | **7.8** |
+| `all` | 11/12 | 1 | 1 | 1208 (4.0×) | 14.6 |
+
+A false refusal recovered and hit@5 up — and, just as important, **false
+answers did not rise**: more phrasings could easily have dragged unanswerable
+questions over the threshold, and the table is what proves they didn't.
+
+The result that changed the shipped default is the tie. Three configurations
+score identically, so the honest choice is the cheap one: the **hypothetical
+answer carries the entire benefit**, and the paraphrases add 2× the
+cross-encoder bill for nothing measurable. `QUERY_REWRITE_VARIANTS` therefore
+defaults to **0** — HyDE only. (The verdict logic originally recommended
+`+rewrites`, because it ranked on quality alone and ignored cost. Fixing that
+tie-break is why the default is what it is.)
+
+Two honesty notes a reviewer should hold this to: the rewrites in
+`evals/rewrites.jsonl` are **frozen and hand-written**, because the suite runs
+keyless — written before any measurement, and applied identically to answerable
+and unanswerable cases, so the author could not tune them toward a flattering
+result. And 22 cases is a thin basis for deleting a lever, which is why the
+paraphrase path stays available rather than being removed.
 
 *"Is there an upper limit on what a claim pays out?"* is answerable — section 7
 covers it. Retrieval surfaces the right chunk. The cross-encoder **ranks it #1**.

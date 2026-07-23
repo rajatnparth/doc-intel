@@ -38,12 +38,23 @@ def events_of(body: str) -> list:
 
 
 class ExplodingLLM:
-    """Any call is a test failure. Used where NEITHER tier-2 routing nor
-    generation may happen: tier-1 hits (short-circuit) and dated questions
-    (router skipped)."""
+    """Generation, or a tier-2 ROUTING call, is a test failure.
+
+    Used where neither may happen: tier-1 hits (short-circuit) and dated
+    questions (router skipped).
+
+    Since phase 11 the ask path has a SECOND llm.extract() consumer — the
+    query rewriter — which legitimately runs on wording questions. So this
+    fake discriminates by instruction rather than forbidding extract()
+    outright: blanket-forbidding it would have quietly turned this test into
+    "no LLM call happens", a claim this file never made and does not want.
+    Rewrite calls are counted and answered with junk, so transformation
+    degrades to the original query and the routing assertions stay exact.
+    """
 
     def __init__(self) -> None:
         self.calls = 0
+        self.rewrite_calls = 0
 
     async def stream_chat(self, prompt, *, temperature=0.0, max_tokens=512):
         self.calls += 1
@@ -51,6 +62,9 @@ class ExplodingLLM:
         yield  # pragma: no cover — makes this an async generator
 
     async def extract(self, text, schema, *, max_tokens=512):
+        if text.lstrip().startswith("Rewrite one customer question"):
+            self.rewrite_calls += 1
+            return "not a rewrite verdict"      # fails Gate 2 -> degrades
         raise AssertionError("tier 2 ran where tier 1 or the as_of guard should have decided")
 
     async def aclose(self) -> None:
